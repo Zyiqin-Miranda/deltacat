@@ -1,12 +1,15 @@
 # Allow classes to use self-referencing Type hints in Python 3.7.
 from __future__ import annotations
 
-from typing import Optional, Dict, Any
+import logging
+from typing import Optional, Dict, Any, List
 
 from deltacat.compute.stats.models.manifest_entry_stats import ManifestEntryStats
 from deltacat.compute.stats.models.stats_result import StatsResult
 from deltacat.compute.stats.types import StatsType
 
+from deltacat import logs
+logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
 
 class DeltaColumnStats(dict):
     """
@@ -57,6 +60,10 @@ class DeltaColumnStats(dict):
 
         return dcs
 
+    @staticmethod
+    def build_from_dict(delta_column_stats: List[str, Any]) -> List[DeltaColumnStats]:
+        return DeltaColumnStats.of(delta_column_stats["column"], ManifestEntryStats.build_from_dict(delta_column_stats["manifestStats"]))
+
     @property
     def column(self) -> str:
         """Returns the column name.
@@ -87,4 +94,5 @@ class DeltaColumnStats(dict):
         return val
 
     def _merge_manifest_stats(self) -> StatsResult:
+
         return StatsResult.merge(self.manifest_stats.stats, {StatsType.PYARROW_TABLE_BYTES})

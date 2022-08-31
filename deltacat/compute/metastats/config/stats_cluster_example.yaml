@@ -6,6 +6,9 @@ provider:
   availability_zone: us-east-1a, us-east-1b, us-east-1c, us-east-1d, us-east-1f
   cache_stopped_nodes: false
   use_internal_ips: true
+  cloudwatch:
+    agent:
+      config: "/home/ubuntu/anaconda3/lib/python3.7/site-packages/deltacat/compute/metastats/deltacat_cloudwatch.json"
 
 max_workers: {{max-workers}}
 
@@ -19,7 +22,7 @@ available_node_types:
     resources: {}
     node_config:
       InstanceType: {{head-instance-type}}
-      ImageId: ami-0343983f3bcafa976 # andes-amzn-ray, us-east-1, ray 1.9.2
+      ImageId: ami-0ea2f74a70b16c5ca
       KeyName: metastats-test
       LaunchTemplate:
         # TODO: replace this with your launch template name!
@@ -31,7 +34,7 @@ available_node_types:
     resources: {}
     node_config:
       InstanceType: {{worker-instance-type}}
-      ImageId: ami-0343983f3bcafa976 # andes-amzn-ray, us-east-1, ray 1.9.2
+      ImageId: ami-0ea2f74a70b16c5ca
       KeyName: metastats-test
       LaunchTemplate:
         # TODO: replace this with your launch template name!
@@ -49,7 +52,7 @@ setup_commands:
   - pip install ~/deltacat/deltacat-0.1.0-py3-none-any.whl
   - pip uninstall -y amzn-ray
   - pip uninstall -y ray
-  - pip install ray[all]==1.13.0
+  - pip install ray[default]==1.13.0
   - chmod 400 /tmp/.ssh/metastats-test.pem
 
 
