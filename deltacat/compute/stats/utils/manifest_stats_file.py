@@ -64,20 +64,19 @@ def read_manifest_stats_file(
     Returns:
         A container that holds a list of manifest entry stats for the given column name
     """
-
     stats_completion_file_url = get_manifest_stats_s3_url(
         bucket,
         column_name,
         delta_locator
     )
-    logger.info(
-        f"reading stats completion file from: {stats_completion_file_url}")
+    # logger.info(
+    #     f"reading stats completion file from: {stats_completion_file_url}")
     stats_completion_info_file = None
     result = s3_utils.download(stats_completion_file_url, fail_if_not_found=False)
     if result:
         json_str = result["Body"].read().decode("utf-8")
         stats_completion_info_file = ManifestEntryStats(json.loads(json_str))
-        logger.info(f"read stats completion info: {stats_completion_info_file}")
+        # logger.info(f"read stats completion info: {stats_completion_info_file}")
     return stats_completion_info_file
 
 
@@ -92,18 +91,18 @@ def write_manifest_stats_file(
         column_name: The name of the column which represents this manifest entry stats
         manifest_entry_stats: The manifest entry stats to serialize and store into S3
     """
-    logger.info(
-        f"writing stats completion file contents: {manifest_entry_stats}")
+    # logger.info(
+    #     f"writing stats completion file contents: {manifest_entry_stats}")
     stats_completion_file_s3_url = get_manifest_stats_s3_url(
         bucket,
         column_name,
         manifest_entry_stats.delta_locator,
     )
-    logger.info(
-        f"writing stats completion file to: {stats_completion_file_s3_url}")
+    # logger.info(
+    #     f"writing stats completion file to: {stats_completion_file_s3_url}")
     s3_utils.upload(
         stats_completion_file_s3_url,
         str(json.dumps(manifest_entry_stats))
     )
-    logger.info(
-        f"stats completion file written to: {stats_completion_file_s3_url}")
+    # logger.info(
+    #     f"stats completion file written to: {stats_completion_file_s3_url}")

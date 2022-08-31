@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import pyarrow as pa
+import logging
 
 from deltacat.compute.stats.models.stats_result import StatsResult
 from deltacat.storage import DeltaLocator
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from deltacat import logs
+logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
 
 class ManifestEntryStats(dict):
     """Holds computed statistics for one or more manifest entries (tables) and their corresponding delta locator.
@@ -26,10 +29,17 @@ class ManifestEntryStats(dict):
         """
 
         mes = ManifestEntryStats()
-        mes["deltaLocator"] = delta_locator
         mes["stats"] = manifest_entries_stats
+        mes["deltaLocator"] = delta_locator
         mes["pyarrowVersion"] = pa.__version__
         return mes
+
+    @staticmethod
+    def build_from_dict(manifest_entries_stats: dict) -> ManifestEntryStats:
+        stats_res_list = []
+        for stats_res in manifest_entries_stats["stats"]:
+            stats_res_list.append(StatsResult.of(stats_res["rowCount"], stats_res["pyarrowTableBytes"]))
+        return ManifestEntryStats.of(stats_res_list, manifest_entries_stats["deltaLocator"])
 
     @property
     def delta_locator(self) -> DeltaLocator:

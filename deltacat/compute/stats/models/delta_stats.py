@@ -1,5 +1,6 @@
 # Allow classes to use self-referencing Type hints in Python 3.7.
 from __future__ import annotations
+import logging
 
 from collections import defaultdict
 from typing import List, Dict, Optional, Set, Any, NamedTuple
@@ -10,6 +11,8 @@ from deltacat.compute.stats.models.stats_result import StatsResult
 from deltacat.compute.stats.types import StatsType
 from deltacat.storage import DeltaLocator
 
+from deltacat import logs
+logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
 
 class DeltaStats(dict):
     """
@@ -59,6 +62,13 @@ class DeltaStats(dict):
         ds["column_stats"] = column_stats
         ds["stats"] = DeltaStats.get_delta_stats(column_stats)
         return ds
+
+    @staticmethod
+    def build_from_dict(delta_stats: dict) -> DeltaStats:
+        delta_column_stats_list = []
+        for dcs in delta_stats["column_stats"]:
+            delta_column_stats_list.append(DeltaColumnStats.build_from_dict(dcs))
+        return DeltaStats.of(delta_column_stats_list)
 
     @property
     def column_stats(self) -> List[DeltaColumnStats]:
@@ -175,6 +185,7 @@ class DeltaStats(dict):
                                              column_stats: Dict[str, List[Optional[StatsResult]]],
                                              manifest_entries_size: int,
                                              stat_types: Optional[Set[StatsType]] = None) -> StatsResult:
+
         manifest_entry_stats_summary_list: List[StatsResult] = []
         for manifest_entry_idx in range(manifest_entries_size):
             curr_manifest_entry_column_stats_list: List[StatsResult] = []
