@@ -7,6 +7,11 @@ import pyarrow as pa
 from deltacat.compute.compactor import DeltaFileEnvelope
 from deltacat.storage import DeltaType
 
+import logging
+from deltacat import logs
+
+logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
+
 _SYS_COL_UUID = "4000f124-dfbd-48c6-885b-7b22621a6d41"
 
 
@@ -62,6 +67,13 @@ _IS_SOURCE_COLUMN_TYPE = pa.bool_()
 _IS_SOURCE_COLUMN_FIELD = pa.field(
     _IS_SOURCE_COLUMN_NAME,
     _IS_SOURCE_COLUMN_TYPE,
+)
+
+_ROW_COUNT_COLUMN_NAME = _get_sys_col_name("row_count")
+_ROW_COUNT_COLUMN_TYPE = pa.int64()
+_ROW_COUNT_COLUMN_FIELD = pa.field(
+    _ROW_COUNT_COLUMN_NAME,
+    _ROW_COUNT_COLUMN_TYPE,
 )
 
 
@@ -129,6 +141,10 @@ def is_source_column_np(table: pa.Table) -> np.ndarray:
     return table[_IS_SOURCE_COLUMN_NAME].to_numpy()
 
 
+def row_count_column_np(table: pa.Table) -> np.ndarray:
+    return table[_ROW_COUNT_COLUMN_NAME].to_numpy()
+
+
 def get_delta_type_column_array(obj) -> Union[pa.Array, pa.ChunkedArray]:
     return pa.array(
         obj,
@@ -140,6 +156,13 @@ def get_is_source_column_array(obj) -> Union[pa.Array, pa.ChunkedArray]:
     return pa.array(
         obj,
         _IS_SOURCE_COLUMN_TYPE,
+    )
+
+
+def get_row_count_column_array(obj) -> Union[pa.Array, pa.ChunkedArray]:
+    return pa.array(
+        obj,
+        _ROW_COUNT_COLUMN_TYPE,
     )
 
 
@@ -173,12 +196,28 @@ def project_delta_file_metadata_on_table(
     )
     table = append_delta_type_col(table, delta_type_iterator)
 
+    logger.info(f"peach_row_count_iterator_int_len2: {int(table.num_rows)}")
+    logger.info(f"peach_row_count_iterator_2: {len(table)}")
+
     # append is source column
     is_source_iterator = repeat(
         True if delta_file_envelope.is_src_delta else False,
         len(table),
     )
     table = append_is_source_col(table, is_source_iterator)
+
+    logger.info(f"peach_row_count_iterator_int_len: {int(table.num_rows)}")
+    logger.info(f"peach_row_count_iterator: {len(table)}")
+    logger.info(f"peach_row_count_iterator_dfe:{delta_file_envelope.row_count}")
+    row_count_iterator = repeat(delta_file_envelope.row_count, len(table))
+    table = append_row_count_col(table, row_count_iterator)
+    return table
+
+
+def append_row_count_col(table: pa.Table, row_count):
+    table = table.append_column(
+        _ROW_COUNT_COLUMN_FIELD, get_row_count_column_array(row_count)
+    )
     return table
 
 
@@ -261,5 +300,6 @@ def get_minimal_hb_schema() -> pa.schema:
             _PARTITION_STREAM_POSITION_COLUMN_FIELD,
             _DELTA_TYPE_COLUMN_FIELD,
             _IS_SOURCE_COLUMN_FIELD,
+            _ROW_COUNT_COLUMN_FIELD,
         ]
     )

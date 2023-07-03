@@ -42,6 +42,8 @@ from deltacat.utils.placement import PlacementGroupConfig
 from typing import List, Set, Optional, Tuple, Dict, Any
 from collections import defaultdict
 from deltacat.utils.metrics import MetricsConfig
+from sungate.storage.andes import EquivalentTableType
+
 from deltacat.compute.compactor.model.compaction_session_audit_info import (
     CompactionSessionAuditInfo,
 )
@@ -251,6 +253,7 @@ def _execute_compaction_round(
         cluster_cpus = int(cluster_resources["CPU"])
         logger.info(f"Total cluster CPUs: {cluster_cpus}")
         node_resource_keys = live_node_resource_keys()
+        node_resource_keys.remove("node:172.31.33.82")
         logger.info(
             f"Found {len(node_resource_keys)} live cluster nodes: "
             f"{node_resource_keys}"
@@ -291,30 +294,45 @@ def _execute_compaction_round(
     # For incremental compaction:
     # Input deltas from two sources: One: new delta; Two: compacted table
 
-    high_watermark = (
-        round_completion_info.high_watermark if round_completion_info else None
-    )
+    # high_watermark = (
+    #     round_completion_info.high_watermark if round_completion_info else None
+    # )
 
     delta_discovery_start = time.monotonic()
-    (
-        input_deltas,
-        previous_last_stream_position_compacted_on_destination_table,
-    ) = io.discover_deltas(
-        source_partition_locator,
-        high_watermark,
-        last_stream_position_to_compact,
-        destination_partition_locator,
-        rebase_source_partition_locator,
-        rebase_source_partition_high_watermark,
-        deltacat_storage,
-        **list_deltas_kwargs,
-    )
+
+    # (
+    #     input_deltas,
+    #     previous_last_stream_position_compacted_on_destination_table,
+    # ) = io.discover_deltas(
+    #     source_partition_locator,
+    #     high_watermark,
+    #     last_stream_position_to_compact,
+    #     destination_partition_locator,
+    #     rebase_source_partition_locator,
+    #     rebase_source_partition_high_watermark,
+    #     deltacat_storage,
+    #     **list_deltas_kwargs,
+    # )
+    input_deltas = deltacat_storage.list_deltas(
+        namespace="bdt-ray-dev",
+        table_name="HOT_COLD_D_MFN_FULFILL_ORDER_ITEMS_6MONTHS_ZYIQIN8",
+        table_version="1",
+        partition_values=[],
+        include_manifest=True,
+    ).all_items()
+    input_deltas_new = deltacat_storage.list_deltas(
+        namespace="MFN",
+        table_name="D_MFN_FULFILL_ORDER_ITEMS",
+        partition_values=[],
+        include_manifest=True,
+        equivalent_table_types=[EquivalentTableType.UNCOMPACTED],
+    ).all_items()[51]
+    input_deltas.append(input_deltas_new)
 
     delta_discovery_end = time.monotonic()
     compaction_audit.set_delta_discovery_time_in_seconds(
         delta_discovery_end - delta_discovery_start
     )
-
     s3_utils.upload(compaction_audit.audit_url, str(json.dumps(compaction_audit)))
 
     if not input_deltas:
@@ -534,6 +552,7 @@ def _execute_compaction_round(
         round_completion_info=round_completion_info,
         source_partition_locator=source_partition_locator,
         partition=partition,
+        rebase_source_partition_locator=rebase_source_partition_locator,
         max_records_per_output_file=records_per_compacted_file,
         compacted_file_content_type=compacted_file_content_type,
         enable_profiler=enable_profiler,
