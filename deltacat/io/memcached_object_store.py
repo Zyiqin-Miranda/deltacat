@@ -7,9 +7,11 @@ from typing import Any, List
 from deltacat import logs
 import uuid
 import socket
+from pymemcache.client.rendezvous import RendezvousHash
 from pymemcache.client.base import Client
 from pymemcache.client.retrying import RetryingClient
 from pymemcache.exceptions import MemcacheUnexpectedCloseError
+
 
 logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
 
@@ -19,12 +21,22 @@ class MemcachedObjectStore(IObjectStore):
     An implementation of object store that uses Memcached.
     """
 
-    def __init__(self, port=11212) -> None:
-        self.client_cache = {}
+    def __init__(self, port=11211, storage_node_ips: List[str] = None) -> None:
+        # self.client_cache = {}
         self.current_ip = None
         self.SEPARATOR = "_"
         self.port = port
+        self.storage_node_ips = storage_node_ips
+        self.hasher = None
+        # self.hasher = RendezvousHash()
+        # self.hasher.add_node(n for n in self.storage_node_ips)
         super().__init__()
+
+    def initialize_hasher(self):
+        if not self.hasher:
+            self.hasher = RendezvousHash()
+            for n in self.storage_node_ips:
+                self.hasher.add_node(n)
 
     def put_many(self, objects: List[object], *args, **kwargs) -> List[Any]:
         input = {}
@@ -43,13 +55,27 @@ class MemcachedObjectStore(IObjectStore):
 
         return result
 
+    # def retry_put(self, obj: object, *args, **kwargs) -> Any:
+    #     retrying = Retrying(
+    #         wait=wait_random_exponential(multiplier=1, max=60),
+    #         stop=stop_after_delay(30 * 60),
+    #         retry=retry_if_exception_type(ConnectionResetError),
+    #     )
+    #     ref = retrying(
+    #         self.put,
+    #         obj=obj,
+    #         *args,
+    #         **kwargs,
+    #     )
+    #     return ref
+
     def put(self, obj: object, *args, **kwargs) -> Any:
         serialized = cloudpickle.dumps(obj)
         uid = uuid.uuid4()
         current_ip = self._get_current_ip()
         ref = self._create_ref(uid, current_ip)
         client = self._get_client_by_ip(current_ip)
-
+        # print(f"debug: current_ip_type: {type(current_ip)}")
         if client.set(uid.__str__(), serialized):
             return ref
         else:
@@ -99,20 +125,35 @@ class MemcachedObjectStore(IObjectStore):
     def _create_ref(self, uid, ip) -> str:
         return f"{uid}{self.SEPARATOR}{ip}"
 
+    # def _get_client_by_ip(self, ip_address: str):
+    #     if ip_address in self.client_cache:
+    #         return self.client_cache[ip_address]
+    #
+    #     base_client = Client((ip_address, self.port))
+    #     client = RetryingClient(
+    #         base_client,
+    #         attempts=3,
+    #         retry_delay=0.01,
+    #         retry_for=[MemcacheUnexpectedCloseError],
+    #     )
+    #
+    #     self.client_cache[ip_address] = client
+    #     return client
+
     def _get_client_by_ip(self, ip_address: str):
-        if ip_address in self.client_cache:
-            return self.client_cache[ip_address]
-
-        base_client = Client((ip_address, self.port))
-        client = RetryingClient(
-            base_client,
-            attempts=3,
-            retry_delay=0.01,
-            retry_for=[MemcacheUnexpectedCloseError],
-        )
-
-        self.client_cache[ip_address] = client
-        return client
+        self.initialize_hasher()
+        storage_node_ip = self.hasher.get_node(ip_address)
+        if storage_node_ip:
+            base_client = Client((storage_node_ip, self.port))
+            client = RetryingClient(
+                base_client,
+                attempts=3,
+                retry_delay=0.01,
+                retry_for=[MemcacheUnexpectedCloseError, ConnectionResetError],
+            )
+            return client
+        else:
+            logger.warning(f"Failed to find storage_node_ip for {ip_address}")
 
     def _get_current_ip(self):
         if self.current_ip is None:

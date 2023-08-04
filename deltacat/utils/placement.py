@@ -21,9 +21,10 @@ logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
 
 @dataclass
 class PlacementGroupConfig:
-    def __init__(self, opts, resource):
+    def __init__(self, opts, resource, node_ips):
         self.opts = opts
         self.resource = resource
+        self.node_ips = node_ips
 
 
 class NodeGroupManager:
@@ -213,6 +214,9 @@ class PlacementGroupManager:
         # if cpu_per_bundle is less than the cpus per node, the pg can still be created on head
         # curent assumption is that the cpu_per_bundle = cpus per node
         # TODO: figure out how to create pg on non-head explicitly
+        print(
+            f"debug: total_cpus_per_pg:{total_cpus_per_pg}, cpu_per_bundle:{cpu_per_bundle}"
+        )
         self._pg_configs = ray.get(
             [
                 _config.options(resources={head_res_key: 0.01}).remote(
@@ -229,8 +233,13 @@ class PlacementGroupManager:
 
     def get_current_node_resource_key(self) -> str:
         # on ec2: address="172.31.34.51:6379"
-        # on manta: address = "2600:1f10:4674:6815:aadb:2dc8:de61:bc8e:6379"
-        current_node_name = ray.experimental.internal_kv.global_gcs_client.address[:-5]
+        # on AWS Glue for Ray: address = "2600:1f10:4674:6815:aadb:2dc8:de61:bc8e:6379"
+        (
+            current_node_name,
+            _,
+        ) = ray.experimental.internal_kv.global_gcs_client.address.rsplit(
+            ":", 1
+        )  # using rsplit split on the last occurence of delimiter ":"
         for node in ray.nodes():
             if node["NodeName"] == current_node_name:
                 # Found the node.
@@ -251,6 +260,7 @@ def _config(
     opts = {}
     cluster_resources = {}
     num_bundles = (int)(total_cpus_per_pg / cpu_per_node)
+    print(f"debug: _config  cpu_per_node: {cpu_per_node}, num_bundles:{num_bundles}")
     bundles = [{"CPU": cpu_per_node} for i in range(num_bundles)]
     pg = placement_group(bundles, strategy=strategy)
     ray.get(pg.ready(), timeout=time_out)
@@ -270,6 +280,7 @@ def _config(
     # query available resources given list of node id
     all_nodes_available_res = ray._private.state.state._available_resources_per_node()
     pg_res = {"CPU": 0, "memory": 0, "object_store_memory": 0}
+    node_ips = []
     for node_id in node_ids:
         if node_id in all_nodes_available_res:
             v = all_nodes_available_res[node_id]
@@ -277,10 +288,14 @@ def _config(
             pg_res["CPU"] += node_detail["resources_total"]["CPU"]
             pg_res["memory"] += v["memory"]
             pg_res["object_store_memory"] += v["object_store_memory"]
+            node_ips.append(node_detail["node_ip"])
     cluster_resources["CPU"] = int(pg_res["CPU"])
     cluster_resources["memory"] = float(pg_res["memory"])
     cluster_resources["object_store_memory"] = float(pg_res["object_store_memory"])
-    pg_config = PlacementGroupConfig(opts, cluster_resources)
+
+    pg_config = PlacementGroupConfig(opts, cluster_resources, node_ips)
     logger.info(f"pg has resources:{cluster_resources}")
 
+    print(f"debug:node_ips:{node_ips}")
+    print(f"debug: placement_group_config: {pg_config}")
     return pg_config
