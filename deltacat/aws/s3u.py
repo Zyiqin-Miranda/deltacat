@@ -3,6 +3,8 @@ import multiprocessing
 from functools import partial
 from typing import Any, Callable, Dict, Generator, List, Optional, Union
 from uuid import uuid4
+from botocore.config import Config
+from deltacat.aws.constants import BOTO_MAX_RETRIES
 
 import pyarrow as pa
 import ray
@@ -39,6 +41,7 @@ from deltacat.types.tables import (
     TABLE_TYPE_TO_READER_FUNC,
     get_table_length,
 )
+from deltacat.types.partial_download import PartialFileDownloadParams
 from deltacat.utils.common import ReadKwargsProvider
 
 logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
@@ -97,6 +100,7 @@ class UuidBlockWritePathProvider(BlockWritePathProvider):
         filesystem: Optional[pa.filesystem.FileSystem] = None,
         dataset_uuid: Optional[str] = None,
         block: Optional[ObjectRef[Block]] = None,
+        task_index: Optional[int] = None,
         block_index: Optional[int] = None,
         file_format: Optional[str] = None,
     ) -> str:
@@ -197,6 +201,7 @@ def read_file(
     column_names: Optional[List[str]] = None,
     include_columns: Optional[List[str]] = None,
     file_reader_kwargs_provider: Optional[ReadKwargsProvider] = None,
+    partial_file_download_params: Optional[PartialFileDownloadParams] = None,
     **s3_client_kwargs,
 ) -> LocalTable:
 
@@ -209,6 +214,7 @@ def read_file(
             column_names,
             include_columns,
             file_reader_kwargs_provider,
+            partial_file_download_params,
             **s3_client_kwargs,
         )
         return table
@@ -217,6 +223,13 @@ def read_file(
             # Timeout error not caught by botocore
             raise RetryableError(f"Retry table download from: {s3_url}") from e
         raise NonRetryableError(f"Failed table download from: {s3_url}") from e
+    except BaseException as e:
+        logger.warn(
+            f"Read has failed for {s3_url} and content_type={content_type} "
+            f"and encoding={content_encoding}. Error: {e}",
+            exc_info=True,
+        )
+        raise e
 
 
 def upload_sliced_table(
@@ -385,14 +398,16 @@ def download_manifest_entry(
     content_encoding: Optional[ContentEncoding] = None,
 ) -> LocalTable:
 
+    conf = Config(retries={"max_attempts": BOTO_MAX_RETRIES, "mode": "adaptive"})
     s3_client_kwargs = (
         {
             "aws_access_key_id": token_holder["accessKeyId"],
             "aws_secret_access_key": token_holder["secretAccessKey"],
             "aws_session_token": token_holder["sessionToken"],
+            "config": conf,
         }
         if token_holder
-        else {}
+        else {"config": conf}
     )
     if not content_type:
         content_type = manifest_entry.meta.content_type
@@ -409,6 +424,14 @@ def download_manifest_entry(
     s3_url = manifest_entry.uri
     if s3_url is None:
         s3_url = manifest_entry.url
+
+    partial_file_download_params = None
+    if manifest_entry.meta and manifest_entry.meta.content_type_parameters:
+        for type_params in manifest_entry.meta.content_type_parameters:
+            if isinstance(type_params, PartialFileDownloadParams):
+                partial_file_download_params = type_params
+                break
+
     # @retry decorator can't be pickled by Ray, so wrap download in Retrying
     retrying = Retrying(
         wait=wait_random_exponential(multiplier=1, max=60),
@@ -424,6 +447,7 @@ def download_manifest_entry(
         column_names,
         include_columns,
         file_reader_kwargs_provider,
+        partial_file_download_params,
         **s3_client_kwargs,
     )
     return table
