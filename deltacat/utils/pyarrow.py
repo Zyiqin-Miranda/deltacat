@@ -405,7 +405,7 @@ def s3_file_to_table(
     _add_column_kwargs(content_type, column_names, include_columns, kwargs)
 
     if pa_read_func_kwargs_provider is not None:
-        kwargs = pa_read_func_kwargs_provider(content_type, kwargs)
+        kwargs = pa_read_func_kwargs_provider._get_kwargs(content_type, kwargs)
 
     if (
         content_type == ContentType.PARQUET.value

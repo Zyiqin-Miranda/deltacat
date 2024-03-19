@@ -177,21 +177,21 @@ def _download_compacted_table(
     if str(hb_index) not in hb_index_to_indices:
         return None
 
-    indices = hb_index_to_indices[str(hb_index)]
+    indices_list = hb_index_to_indices[str(hb_index)]
 
-    assert (
-        indices is not None and len(indices) == 2
-    ), "indices should not be none and contains exactly two elements"
+    # assert (
+    #     indices is not None and len(indices) == 2
+    # ), "indices should not be none and contains exactly two elements"
+    for indices in indices_list:
+        for offset in range(indices[1] - indices[0]):
+            table = deltacat_storage.download_delta_manifest_entry(
+                rcf.compacted_delta_locator,
+                entry_index=(indices[0] + offset),
+                file_reader_kwargs_provider=read_kwargs_provider,
+                **deltacat_storage_kwargs,
+            )
 
-    for offset in range(indices[1] - indices[0]):
-        table = deltacat_storage.download_delta_manifest_entry(
-            rcf.compacted_delta_locator,
-            entry_index=(indices[0] + offset),
-            file_reader_kwargs_provider=read_kwargs_provider,
-            **deltacat_storage_kwargs,
-        )
-
-        tables.append(table)
+            tables.append(table)
 
     return pa.concat_tables(tables)
 
@@ -221,14 +221,15 @@ def _copy_all_manifest_files_from_old_hash_buckets(
         if str(hb_index) not in hb_index_to_indices:
             continue
 
-        indices = hb_index_to_indices[str(hb_index)]
-        for offset in range(indices[1] - indices[0]):
-            entry_index = indices[0] + offset
-            assert entry_index < len(
-                manifest.entries
-            ), f"entry index: {entry_index} >= {len(manifest.entries)}"
-            manifest_entry = manifest.entries[entry_index]
-            manifest_entry_referenced_list.append(manifest_entry)
+        indices_range = hb_index_to_indices[str(hb_index)]
+        for indices in indices_range:
+            for offset in range(indices[1] - indices[0]):
+                entry_index = indices[0] + offset
+                assert entry_index < len(
+                    manifest.entries
+                ), f"entry index: {entry_index} >= {len(manifest.entries)}"
+                manifest_entry = manifest.entries[entry_index]
+                manifest_entry_referenced_list.append(manifest_entry)
 
         manifest = Manifest.of(
             entries=manifest_entry_referenced_list, uuid=str(uuid4())
@@ -372,6 +373,118 @@ def _timed_merge(input: MergeInput) -> MergeResult:
             f"[Hash group index: {input.merge_file_groups_provider.hash_group_index}]"
             f" Total number of materialized results produced: {len(materialized_results)} "
         )
+
+        input.merge_file_groups_provider.delete()
+
+        peak_memory_usage_bytes = get_current_process_peak_memory_usage_in_bytes()
+        logger.info(
+            f"Peak memory usage in bytes after merge: {peak_memory_usage_bytes}"
+        )
+
+        return MergeResult(
+            materialized_results,
+            np.int64(total_input_records),
+            np.int64(total_deduped_records),
+            np.double(peak_memory_usage_bytes),
+            np.double(0.0),
+            np.double(time.time()),
+        )
+
+
+def _drop_duplicated_previously_materialized(materialized_table, primary_keys):
+    all_tables = []
+    incremental_idx = 0
+
+    all_tables.append(materialized_table)
+
+    all_tables = generate_pk_hash_column(all_tables, primary_keys=primary_keys)
+
+    result_table_list = []
+
+    no_duplicate_table = drop_duplicates(
+        all_tables[incremental_idx], on=sc._PK_HASH_STRING_COLUMN_NAME
+    )
+    incremental_table = _drop_delta_type_rows(no_duplicate_table, DeltaType.DELETE)
+    result_table_list.append(incremental_table)
+
+    final_table = pa.concat_tables(result_table_list)
+    final_table = final_table.drop([sc._PK_HASH_STRING_COLUMN_NAME])
+
+    return final_table
+
+
+def _merge_only_compacted_table(
+    hb_idx,
+    round_completion_info,
+    read_kwargs_provider,
+    deltacat_storage,
+    deltacat_storage_kwargs,
+    primary_keys,
+):
+    if (
+        round_completion_info
+        and round_completion_info.hb_index_to_entry_range
+        and round_completion_info.hb_index_to_entry_range.get(str(hb_idx)) is not None
+    ):
+        materialized_table = _download_compacted_table(
+            hb_index=hb_idx,
+            rcf=round_completion_info,
+            read_kwargs_provider=read_kwargs_provider,
+            deltacat_storage=deltacat_storage,
+            deltacat_storage_kwargs=deltacat_storage_kwargs,
+        )
+
+        hb_table_record_count = len(materialized_table)
+
+        table, merge_time = timed_invocation(
+            func=_drop_duplicated_previously_materialized,
+            materialized_table=materialized_table,
+            primary_keys=primary_keys,
+        )
+        total_deduped_records = hb_table_record_count - len(table)
+
+        logger.info(
+            f"[Merge task index {hb_idx}] Merged "
+            f"record count: {len(table)}, size={table.nbytes} took: {merge_time}s"
+        )
+
+        return table, 0, total_deduped_records
+    else:
+        return None, 0, 0
+
+
+@ray.remote
+def merge_materialized_table(
+    hb_idx,
+    input,
+    round_completion_info,
+    read_kwargs_provider,
+    deltacat_storage,
+    deltacat_storage_kwargs,
+    primary_keys,
+):
+    total_input_records, total_deduped_records = 0, 0
+    materialized_results: List[MaterializeResult] = []
+
+    # input_deltas_list = round_completion_info.compacted_delta_locator
+    table, input_records, deduped_records = _merge_only_compacted_table(
+        hb_idx=hb_idx,
+        round_completion_info=round_completion_info,
+        read_kwargs_provider=read_kwargs_provider,
+        deltacat_storage=deltacat_storage,
+        deltacat_storage_kwargs=deltacat_storage_kwargs,
+        primary_keys=primary_keys,
+    )
+
+    if table:
+        total_input_records += input_records
+        total_deduped_records += deduped_records
+        materialized_results.append(merge_utils.materialize(input, hb_idx, [table]))
+
+        # logger.info(
+        #     f"[Hash group index: {input.merge_file_groups_provider.hash_group_index}]"
+        #     f" Total number of materialized results produced: {len(materialized_results)} "
+        # )
 
         peak_memory_usage_bytes = get_current_process_peak_memory_usage_in_bytes()
         logger.info(

@@ -34,7 +34,7 @@ class MemcachedObjectStore(IObjectStore):
         noreply: bool = False,
         max_item_size_bytes: int = MAX_ITEM_SIZE_BYTES,
     ) -> None:
-        self.client_cache = {}
+        # self.client_cache = {}
         self.current_ip = None
         self.SEPARATOR = "_"
         self.port = port
@@ -171,6 +171,15 @@ class MemcachedObjectStore(IObjectStore):
         ), f"The total number of refs must be equal as {len(result)} != {len(refs)}"
         return result
 
+    def stats(self):
+        ips = self.storage_node_ips
+        client_stats_list = []
+        for ip in ips:
+            client = self._get_client_by_ip(ip)
+            client_stats_list.append([ip, client.stats()])
+
+        return client_stats_list
+
     def get(self, ref: Any, *args, **kwargs) -> object:
         uid, ip, chunk_count = ref.split(self.SEPARATOR)
         chunk_count = int(chunk_count)
@@ -185,11 +194,28 @@ class MemcachedObjectStore(IObjectStore):
 
         return cloudpickle.loads(serialized)
 
-    def close(self) -> None:
-        for client in self.client_cache.values():
-            client.close()
+    def delete_many(self, refs: List[Any], *args, **kwargs):
+        uid_per_ip = defaultdict(lambda: [])
 
-        self.client_cache.clear()
+        for ref in refs:
+            uid, ip, chunk_count = ref.split(self.SEPARATOR)
+            chunk_count = int(chunk_count)
+            for chunk_index in range(chunk_count):
+                current_ref = self._create_ref(uid, ip, chunk_index)
+                uid_per_ip[ip].append(current_ref)
+
+        for (ip, uids) in uid_per_ip.items():
+            client = self._get_client_by_ip(ip)
+            for uid in uids:
+                delete_result = client.delete(uid, noreply=False)
+                logger.info(f"delete_object_res:{uid}, {delete_result}")
+
+    def close(self) -> None:
+        print(f"closing")
+        # for client in self.client_cache.values():
+        #     client.close()
+        #
+        # self.client_cache.clear()
 
     def _create_ref(self, uid, ip, chunk_index) -> str:
         return f"{uid}{self.SEPARATOR}{ip}{self.SEPARATOR}{chunk_index}"
@@ -206,8 +232,8 @@ class MemcachedObjectStore(IObjectStore):
         return create_ref_ip
 
     def _get_client_by_ip(self, ip_address: str):
-        if ip_address in self.client_cache:
-            return self.client_cache[ip_address]
+        # if ip_address in self.client_cache:
+        #     return self.client_cache[ip_address]
 
         base_client = Client(
             (ip_address, self.port),
@@ -229,7 +255,7 @@ class MemcachedObjectStore(IObjectStore):
             ],
         )
 
-        self.client_cache[ip_address] = client
+        # self.client_cache[ip_address] = client
         return client
 
     def _get_current_ip(self):

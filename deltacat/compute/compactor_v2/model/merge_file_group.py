@@ -208,6 +208,9 @@ class RemoteMergeFileGroupsProvider(MergeFileGroupsProvider):
 
         return self._dfe_groups
 
+    def delete(self):
+        self.object_store.delete_many(self._dfe_groups_refs)
+
     @property
     def hash_group_index(self):
         return self._hash_group_index

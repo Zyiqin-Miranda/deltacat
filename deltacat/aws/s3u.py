@@ -107,6 +107,7 @@ class UuidBlockWritePathProvider(BlockWritePathProvider):
         filesystem: Optional[pa.filesystem.FileSystem] = None,
         dataset_uuid: Optional[str] = None,
         block: Optional[ObjectRef[Block]] = None,
+        task_index: Optional[int] = None,
         block_index: Optional[int] = None,
         file_format: Optional[str] = None,
     ) -> str:
