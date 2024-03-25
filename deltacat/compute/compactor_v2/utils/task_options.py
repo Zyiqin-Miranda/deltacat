@@ -316,33 +316,36 @@ def get_memory_required(
         data_size = 0
         num_rows = 0
         pk_size_bytes = 0
-        for entry_tuple in round_completion_info.hb_index_to_entry_range[str(hb_idx)]:
-            entry_start, entry_end = entry_tuple
-            for entry_index in range(entry_start, entry_end):
-                entry = compacted_delta_manifest.entries[entry_index]
+        entry_list = round_completion_info.hb_index_to_entry_range[str(hb_idx)]
+        # for entry_list in round_completion_info.hb_index_to_entry_range[str(hb_idx)]:
+        entry_start, entry_end = entry_list[0], entry_list[1]
+        # for entry_tuple in round_completion_info.hb_index_to_entry_range[str(hb_idx)]:
+        #     entry_start, entry_end = entry_tuple
+        for entry_index in range(entry_start, entry_end):
+            entry = compacted_delta_manifest.entries[entry_index]
 
-                current_entry_size = estimate_manifest_entry_size_bytes(
-                    entry=entry, previous_inflation=2.5
-                )
-                current_entry_rows = estimate_manifest_entry_num_rows(
+            current_entry_size = estimate_manifest_entry_size_bytes(
+                entry=entry, previous_inflation=25
+            )
+            current_entry_rows = estimate_manifest_entry_num_rows(
+                entry=entry,
+                average_record_size_bytes=1600,
+                previous_inflation=25,
+            )
+
+            data_size += current_entry_size
+            num_rows += current_entry_rows
+
+            if primary_keys:
+                pk_size = estimate_manifest_entry_column_size_bytes(
                     entry=entry,
-                    average_record_size_bytes=1600,
-                    previous_inflation=2.5,
+                    columns=primary_keys,
                 )
 
-                data_size += current_entry_size
-                num_rows += current_entry_rows
-
-                if primary_keys:
-                    pk_size = estimate_manifest_entry_column_size_bytes(
-                        entry=entry,
-                        columns=primary_keys,
-                    )
-
-                    if pk_size is None:
-                        pk_size_bytes += current_entry_size
-                    else:
-                        pk_size_bytes += pk_size
+                if pk_size is None:
+                    pk_size_bytes += current_entry_size
+                else:
+                    pk_size_bytes += pk_size
 
         # total data downloaded + primary key hash column + pyarrow-to-numpy conversion
         # + primary key column + hashlib inefficiency + dict size for merge + incremental index array size
@@ -356,4 +359,4 @@ def get_memory_required(
     )
 
     total_memory = total_memory * (1 + TOTAL_MEMORY_BUFFER_PERCENTAGE / 100.0)
-    return total_memory
+    return total_memory * 3

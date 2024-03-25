@@ -177,21 +177,21 @@ def _download_compacted_table(
     if str(hb_index) not in hb_index_to_indices:
         return None
 
-    indices_list = hb_index_to_indices[str(hb_index)]
+    indices = hb_index_to_indices[str(hb_index)]
 
     # assert (
     #     indices is not None and len(indices) == 2
     # ), "indices should not be none and contains exactly two elements"
-    for indices in indices_list:
-        for offset in range(indices[1] - indices[0]):
-            table = deltacat_storage.download_delta_manifest_entry(
-                rcf.compacted_delta_locator,
-                entry_index=(indices[0] + offset),
-                file_reader_kwargs_provider=read_kwargs_provider,
-                **deltacat_storage_kwargs,
-            )
+    # for indices in indices_list:
+    for offset in range(indices[1] - indices[0]):
+        table = deltacat_storage.download_delta_manifest_entry(
+            rcf.compacted_delta_locator,
+            entry_index=(indices[0] + offset),
+            file_reader_kwargs_provider=read_kwargs_provider,
+            **deltacat_storage_kwargs,
+        )
 
-            tables.append(table)
+        tables.append(table)
 
     return pa.concat_tables(tables)
 
@@ -374,7 +374,7 @@ def _timed_merge(input: MergeInput) -> MergeResult:
             f" Total number of materialized results produced: {len(materialized_results)} "
         )
 
-        input.merge_file_groups_provider.delete()
+        # input.merge_file_groups_provider.delete()
 
         peak_memory_usage_bytes = get_current_process_peak_memory_usage_in_bytes()
         logger.info(

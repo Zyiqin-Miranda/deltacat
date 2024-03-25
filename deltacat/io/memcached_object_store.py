@@ -263,3 +263,8 @@ class MemcachedObjectStore(IObjectStore):
             self.current_ip = socket.gethostbyname(socket.gethostname())
 
         return self.current_ip
+
+    def clear(self, *args, **kwargs) -> bool:
+        for ip in self.storage_node_ips:
+            client = self._get_client_by_ip(ip)
+            client.flush_all(noreply=False)
