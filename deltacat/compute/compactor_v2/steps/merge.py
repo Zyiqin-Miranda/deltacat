@@ -12,6 +12,7 @@ from uuid import uuid4
 from deltacat import logs
 from typing import Callable, Iterator, List, Optional, Tuple
 from deltacat.compute.compactor_v2.model.merge_result import MergeResult
+from deltacat.compute.compactor_v2.model.merge_file_group import MergeFileGroup
 from deltacat.compute.compactor.model.materialize_result import MaterializeResult
 from deltacat.compute.compactor.model.pyarrow_write_result import PyArrowWriteResult
 from deltacat.compute.compactor import RoundCompletionInfo, DeltaFileEnvelope
@@ -23,7 +24,7 @@ from deltacat.utils.ray_utils.runtime import (
 )
 from deltacat.compute.compactor.utils import system_columns as sc
 from deltacat.utils.performance import timed_invocation
-from deltacat.utils.metrics import emit_timer_metrics
+from deltacat.utils.metrics import emit_timer_metrics, failure_metric, success_metric
 from deltacat.utils.resources import (
     get_current_process_peak_memory_usage_in_bytes,
     ProcessUtilizationOverTimeRange,
@@ -41,6 +42,11 @@ from deltacat.storage import (
 )
 from deltacat.compute.compactor_v2.utils.dedupe import drop_duplicates
 from deltacat.constants import BYTES_PER_GIBIBYTE
+from deltacat.compute.compactor_v2.constants import (
+    MERGE_TIME_IN_SECONDS,
+    MERGE_SUCCESS_COUNT,
+    MERGE_FAILURE_COUNT,
+)
 
 
 if importlib.util.find_spec("memray"):
@@ -269,6 +275,24 @@ def _has_previous_compacted_table(input: MergeInput, hb_idx: int) -> bool:
     )
 
 
+def _can_copy_by_reference(
+    has_delete: bool, merge_file_group: MergeFileGroup, input: MergeInput
+) -> bool:
+    """
+    Can copy by reference only if there are no deletes to merge in
+    and previous compacted stream id matches that of new stream
+    """
+    return (
+        not has_delete
+        and not merge_file_group.dfe_groups
+        and input.round_completion_info is not None
+        and (
+            input.write_to_partition.stream_id
+            == input.round_completion_info.compacted_delta_locator.stream_id
+        )
+    )
+
+
 def _flatten_dfe_list(
     df_envelopes_list: List[List[DeltaFileEnvelope]],
 ) -> List[DeltaFileEnvelope]:
@@ -460,6 +484,8 @@ def _copy_manifests_from_hash_bucketing(
     return materialized_results
 
 
+@success_metric(name=MERGE_SUCCESS_COUNT)
+@failure_metric(name=MERGE_FAILURE_COUNT)
 def _timed_merge(input: MergeInput) -> MergeResult:
     task_id = get_current_ray_task_id()
     worker_id = get_current_ray_worker_id()
@@ -479,10 +505,12 @@ def _timed_merge(input: MergeInput) -> MergeResult:
                 assert (
                     input.delete_strategy is not None
                 ), "Merge input missing delete_strategy"
-            if not has_delete and not merge_file_group.dfe_groups:
-                # Can copy by reference only if there are no deletes to merge in
+            if _can_copy_by_reference(
+                has_delete=has_delete, merge_file_group=merge_file_group, input=input
+            ):
                 hb_index_copy_by_ref_ids.append(merge_file_group.hb_index)
                 continue
+
             if _has_previous_compacted_table(input, merge_file_group.hb_index):
                 compacted_table = _download_compacted_table(
                     hb_index=merge_file_group.hb_index,
@@ -557,7 +585,7 @@ def merge(input: MergeInput) -> MergeResult:
         if input.metrics_config:
             emit_result, latency = timed_invocation(
                 func=emit_timer_metrics,
-                metrics_name="merge",
+                metrics_name=MERGE_TIME_IN_SECONDS,
                 value=duration,
                 metrics_config=input.metrics_config,
             )
