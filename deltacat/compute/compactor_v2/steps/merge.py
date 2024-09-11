@@ -47,7 +47,9 @@ from deltacat.compute.compactor_v2.constants import (
     MERGE_SUCCESS_COUNT,
     MERGE_FAILURE_COUNT,
 )
-
+from deltacat.exceptions import (
+    categorize_errors,
+)
 
 if importlib.util.find_spec("memray"):
     import memray
@@ -175,13 +177,10 @@ def _download_compacted_table(
 
     if str(hb_index) not in hb_index_to_indices:
         return None
-
     indices = hb_index_to_indices[str(hb_index)]
-
     assert (
         indices is not None and len(indices) == 2
     ), "indices should not be none and contains exactly two elements"
-
     for offset in range(indices[1] - indices[0]):
         table = deltacat_storage.download_delta_manifest_entry(
             rcf.compacted_delta_locator,
@@ -282,15 +281,18 @@ def _can_copy_by_reference(
     Can copy by reference only if there are no deletes to merge in
     and previous compacted stream id matches that of new stream
     """
-    return (
+    copy_by_ref = (
         not has_delete
         and not merge_file_group.dfe_groups
         and input.round_completion_info is not None
-        and (
-            input.write_to_partition.stream_id
-            == input.round_completion_info.compacted_delta_locator.stream_id
-        )
     )
+
+    if input.disable_copy_by_reference:
+        copy_by_ref = False
+
+    logger.info(f"Copy by reference is {copy_by_ref} for {merge_file_group.hb_index}")
+
+    return copy_by_ref
 
 
 def _flatten_dfe_list(
@@ -486,6 +488,7 @@ def _copy_manifests_from_hash_bucketing(
 
 @success_metric(name=MERGE_SUCCESS_COUNT)
 @failure_metric(name=MERGE_FAILURE_COUNT)
+@categorize_errors
 def _timed_merge(input: MergeInput) -> MergeResult:
     task_id = get_current_ray_task_id()
     worker_id = get_current_ray_worker_id()

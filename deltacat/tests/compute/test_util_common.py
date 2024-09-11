@@ -20,6 +20,19 @@ from deltacat.tests.compute.test_util_constant import (
     REBASING_TABLE_NAME,
     REBASING_TABLE_VERSION,
 )
+from deltacat.compute.compactor import (
+    RoundCompletionInfo,
+)
+from deltacat.compute.compactor.model.compaction_session_audit_info import (
+    CompactionSessionAuditInfo,
+)
+
+from deltacat.storage.model.partition import PartitionLocator
+from deltacat.storage.model.stream import StreamLocator
+from deltacat.storage.model.table_version import TableVersionLocator
+from deltacat.storage.model.table import TableLocator
+from deltacat.storage.model.namespace import NamespaceLocator
+from deltacat.compute.compactor.model.compactor_version import CompactorVersion
 
 
 class PartitionKeyType(str, Enum):
@@ -46,6 +59,18 @@ class PartitionKey(dict):
 """
 UTILS
 """
+
+
+def get_test_partition_locator(partition_id):
+    tv_locator = TableVersionLocator.of(
+        TableLocator.of(NamespaceLocator.of("default"), "test_table"), "1"
+    )
+    stream_locator = StreamLocator.of(tv_locator, "test_stream_id", "local")
+    partition_locator = PartitionLocator.of(
+        stream_locator, partition_id=partition_id, partition_values=[]
+    )
+
+    return partition_locator
 
 
 def _create_table(
@@ -134,13 +159,10 @@ def create_rebase_table(
     )
 
 
-def get_rcf(s3_resource, rcf_file_s3_uri: str):
+def get_rcf(s3_resource, rcf_file_s3_uri: str) -> RoundCompletionInfo:
     from deltacat.tests.test_utils.utils import read_s3_contents
-    from deltacat.compute.compactor import (
-        RoundCompletionInfo,
-    )
 
-    _, rcf_object_key = rcf_file_s3_uri.rsplit("/", 1)
+    _, rcf_object_key = rcf_file_s3_uri.strip("s3://").split("/", 1)
     rcf_file_output: Dict[str, Any] = read_s3_contents(
         s3_resource, TEST_S3_RCF_BUCKET_NAME, rcf_object_key
     )
@@ -151,9 +173,6 @@ def get_compacted_delta_locator_from_rcf(
     s3_resource: ServiceResource, rcf_file_s3_uri: str
 ):
     from deltacat.storage import DeltaLocator
-    from deltacat.compute.compactor import (
-        RoundCompletionInfo,
-    )
 
     round_completion_info: RoundCompletionInfo = get_rcf(s3_resource, rcf_file_s3_uri)
 
@@ -200,3 +219,100 @@ def offer_iso8601_timestamp_list(
             )
         )
     return res
+
+
+def assert_compaction_audit(
+    compactor_version: CompactorVersion, compaction_audit: CompactionSessionAuditInfo
+):
+    if compactor_version == CompactorVersion.V2:
+        audit_entries = [
+            compaction_audit.deltacat_version,
+            compaction_audit.ray_version,
+            compaction_audit.audit_url,
+            compaction_audit.hash_bucket_count,
+            compaction_audit.compactor_version,
+            compaction_audit.input_size_bytes,
+            compaction_audit.input_file_count,
+            compaction_audit.estimated_in_memory_size_bytes_during_discovery,
+            compaction_audit.uniform_deltas_created,
+            compaction_audit.delta_discovery_time_in_seconds,
+            compaction_audit.hash_bucket_time_in_seconds,
+            compaction_audit.hash_bucket_invoke_time_in_seconds,
+            compaction_audit.hash_bucket_result_size_bytes,
+            compaction_audit.total_cluster_object_store_memory_bytes,
+            compaction_audit.total_cluster_memory_bytes,
+            compaction_audit.total_object_store_memory_used_bytes,
+            compaction_audit.hash_bucket_post_object_store_memory_used_bytes,
+            compaction_audit.hash_bucket_result_wait_time_in_seconds,
+            compaction_audit.peak_memory_used_bytes_per_hash_bucket_task,
+            compaction_audit.hash_bucket_processed_size_bytes,
+            compaction_audit.input_records,
+            compaction_audit.merge_time_in_seconds,
+            compaction_audit.merge_invoke_time_in_seconds,
+            compaction_audit.merge_result_size,
+            compaction_audit.merge_post_object_store_memory_used_bytes,
+            compaction_audit.merge_result_wait_time_in_seconds,
+            compaction_audit.peak_memory_used_bytes_per_merge_task,
+            compaction_audit.records_deduped,
+            compaction_audit.records_deleted,
+            compaction_audit.compaction_time_in_seconds,
+            compaction_audit.peak_memory_used_bytes_by_compaction_session_process,
+            compaction_audit.untouched_file_count,
+            compaction_audit.untouched_file_ratio,
+            compaction_audit.untouched_record_count,
+            compaction_audit.untouched_size_bytes,
+            compaction_audit.output_file_count,
+            compaction_audit.output_size_bytes,
+            compaction_audit.output_size_pyarrow_bytes,
+            compaction_audit.peak_memory_used_bytes_per_task,
+            compaction_audit.pyarrow_version,
+            compaction_audit.telemetry_time_in_seconds,
+        ]
+        for entry in audit_entries:
+            assert entry is not None
+    return True
+
+
+def assert_compaction_audit_no_hash_bucket(
+    compactor_version: CompactorVersion, compaction_audit: CompactionSessionAuditInfo
+):
+    if compactor_version == CompactorVersion.V2:
+        audit_entries = [
+            compaction_audit.deltacat_version,
+            compaction_audit.ray_version,
+            compaction_audit.audit_url,
+            compaction_audit.hash_bucket_count,
+            compaction_audit.compactor_version,
+            compaction_audit.input_size_bytes,
+            compaction_audit.input_file_count,
+            compaction_audit.estimated_in_memory_size_bytes_during_discovery,
+            compaction_audit.uniform_deltas_created,
+            compaction_audit.delta_discovery_time_in_seconds,
+            compaction_audit.total_cluster_object_store_memory_bytes,
+            compaction_audit.total_cluster_memory_bytes,
+            compaction_audit.total_object_store_memory_used_bytes,
+            compaction_audit.input_records,
+            compaction_audit.merge_time_in_seconds,
+            compaction_audit.merge_invoke_time_in_seconds,
+            compaction_audit.merge_result_size,
+            compaction_audit.merge_post_object_store_memory_used_bytes,
+            compaction_audit.merge_result_wait_time_in_seconds,
+            compaction_audit.peak_memory_used_bytes_per_merge_task,
+            compaction_audit.records_deduped,
+            compaction_audit.records_deleted,
+            compaction_audit.compaction_time_in_seconds,
+            compaction_audit.peak_memory_used_bytes_by_compaction_session_process,
+            compaction_audit.untouched_file_count,
+            compaction_audit.untouched_file_ratio,
+            compaction_audit.untouched_record_count,
+            compaction_audit.untouched_size_bytes,
+            compaction_audit.output_file_count,
+            compaction_audit.output_size_bytes,
+            compaction_audit.output_size_pyarrow_bytes,
+            compaction_audit.peak_memory_used_bytes_per_task,
+            compaction_audit.pyarrow_version,
+            compaction_audit.telemetry_time_in_seconds,
+        ]
+        for entry in audit_entries:
+            assert entry is not None
+    return True

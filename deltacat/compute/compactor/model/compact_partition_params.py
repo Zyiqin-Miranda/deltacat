@@ -21,6 +21,8 @@ from deltacat.compute.compactor_v2.constants import (
     TASK_MAX_PARALLELISM,
     DROP_DUPLICATES,
     TOTAL_MEMORY_BUFFER_PERCENTAGE,
+    DEFAULT_DISABLE_COPY_BY_REFERENCE,
+    DEFAULT_NUM_ROUNDS,
 )
 from deltacat.constants import PYARROW_INFLATION_MULTIPLIER
 from deltacat.compute.compactor.utils.sort_key import validate_sort_keys
@@ -50,7 +52,6 @@ class CompactPartitionParams(dict):
 
         result = CompactPartitionParams(params)
 
-        # TODO: move defaults to single file
         result.records_per_compacted_file = params.get(
             "records_per_compacted_file", MAX_RECORDS_PER_COMPACTED_FILE
         )
@@ -92,12 +93,17 @@ class CompactPartitionParams(dict):
         result.hash_group_count = params.get(
             "hash_group_count", result.hash_bucket_count
         )
+        result.disable_copy_by_reference = params.get(
+            "disable_copy_by_reference", DEFAULT_DISABLE_COPY_BY_REFERENCE
+        )
         result.drop_duplicates = params.get("drop_duplicates", DROP_DUPLICATES)
         result.ray_custom_resources = params.get("ray_custom_resources")
 
         result.memory_logs_enabled = params.get("memory_logs_enabled", False)
 
         result.metrics_config = params.get("metrics_config")
+
+        result.num_rounds = params.get("num_rounds", DEFAULT_NUM_ROUNDS)
 
         if not importlib.util.find_spec("memray"):
             result.enable_profiler = False
@@ -182,6 +188,10 @@ class CompactPartitionParams(dict):
 
     @property
     def task_max_parallelism(self) -> int:
+        if self.pg_config:
+            cluster_resources = self.pg_config.resource
+            cluster_cpus = cluster_resources["CPU"]
+            self.task_max_parallelism = cluster_cpus
         return self["task_max_parallelism"]
 
     @task_max_parallelism.setter
@@ -237,6 +247,14 @@ class CompactPartitionParams(dict):
     @enable_profiler.setter
     def enable_profiler(self, value: bool) -> None:
         self["enable_profiler"] = value
+
+    @property
+    def disable_copy_by_reference(self) -> bool:
+        return self["disable_copy_by_reference"]
+
+    @disable_copy_by_reference.setter
+    def disable_copy_by_reference(self, value: bool) -> None:
+        self["disable_copy_by_reference"] = value
 
     @property
     def list_deltas_kwargs(self) -> dict:
@@ -386,6 +404,14 @@ class CompactPartitionParams(dict):
     @metrics_config.setter
     def metrics_config(self, config: MetricsConfig) -> None:
         self["metrics_config"] = config
+
+    @property
+    def num_rounds(self) -> int:
+        return self["num_rounds"]
+
+    @num_rounds.setter
+    def num_rounds(self, num_rounds: int) -> None:
+        self["num_rounds"] = num_rounds
 
     @staticmethod
     def json_handler_for_compact_partition_params(obj):

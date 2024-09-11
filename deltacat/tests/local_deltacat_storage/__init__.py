@@ -12,6 +12,7 @@ import io
 from deltacat.tests.test_utils.storage import create_empty_delta
 from deltacat.utils.common import current_time_ms
 
+
 from deltacat.storage import (
     Delta,
     DeltaLocator,
@@ -40,6 +41,12 @@ from deltacat.storage import (
     ManifestEntry,
     ManifestEntryList,
     DeleteParameters,
+    PartitionFilter,
+    PartitionValues,
+    DeltaPartitionSpec,
+    StreamPartitionSpec,
+    TransformName,
+    IdentityTransformParameters,
 )
 from deltacat.types.media import (
     ContentType,
@@ -49,6 +56,10 @@ from deltacat.types.media import (
     DistributedDatasetType,
 )
 from deltacat.utils.common import ReadKwargsProvider
+from deltacat.tests.local_deltacat_storage.exceptions import (
+    InvalidNamespaceError,
+    LocalStorageValidationError,
+)
 
 SQLITE_CUR_ARG = "sqlite3_cur"
 SQLITE_CON_ARG = "sqlite3_con"
@@ -95,6 +106,19 @@ def _get_sqlite3_cursor_con(kwargs) -> Tuple[Cursor, Connection]:
 
 def _get_manifest_entry_uri(manifest_entry_id: str) -> str:
     return f"cloudpickle://{manifest_entry_id}"
+
+
+def _merge_and_promote(
+    partition_deltas: List[Delta], previous_partition_deltas: List[Delta]
+):
+    previous_partition_deltas_spos_gt: List[Delta] = [
+        delta
+        for delta in previous_partition_deltas
+        if delta.stream_position > partition_deltas[0].stream_position
+    ]
+    # handle the case if the previous partition deltas have a greater stream position than the partition_delta
+    partition_deltas = previous_partition_deltas_spos_gt + partition_deltas
+    return partition_deltas
 
 
 def list_namespaces(*args, **kwargs) -> ListResult[Namespace]:
@@ -176,18 +200,26 @@ def list_stream_partitions(stream: Stream, *args, **kwargs) -> ListResult[Partit
 def list_deltas(
     namespace: str,
     table_name: str,
-    partition_values: Optional[List[Any]] = None,
+    partition_values: Optional[PartitionValues] = None,
     table_version: Optional[str] = None,
     first_stream_position: Optional[int] = None,
     last_stream_position: Optional[int] = None,
     ascending_order: Optional[bool] = None,
     include_manifest: bool = False,
+    partition_filter: Optional[PartitionFilter] = None,
     *args,
     **kwargs,
 ) -> ListResult[Delta]:
     stream = get_stream(namespace, table_name, table_version, *args, **kwargs)
     if stream is None:
         return ListResult.of([], None, None)
+
+    if partition_values is not None and partition_filter is not None:
+        raise ValueError(
+            "Only one of partition_values or partition_filter must be provided"
+        )
+    if partition_filter is not None:
+        partition_values = partition_filter.partition_values
 
     partition = get_partition(stream.locator, partition_values, *args, **kwargs)
 
@@ -271,9 +303,7 @@ def list_partition_deltas(
         if not include_manifest:
             current_delta.manifest = None
 
-    result.sort(
-        reverse=True if not ascending_order else False, key=lambda d: d.stream_position
-    )
+    result.sort(reverse=(not ascending_order), key=lambda d: d.stream_position)
     return ListResult.of(result, None, None)
 
 
@@ -281,15 +311,25 @@ def get_delta(
     namespace: str,
     table_name: str,
     stream_position: int,
-    partition_values: Optional[List[Any]] = None,
+    partition_values: Optional[PartitionValues] = None,
     table_version: Optional[str] = None,
     include_manifest: bool = False,
+    partition_filter: Optional[PartitionFilter] = None,
     *args,
     **kwargs,
 ) -> Optional[Delta]:
     cur, con = _get_sqlite3_cursor_con(kwargs)
 
     stream = get_stream(namespace, table_name, table_version, *args, **kwargs)
+
+    if partition_values is not None and partition_filter is not None:
+        raise ValueError(
+            "Only one of partition_values or partition_filter must be provided"
+        )
+
+    if partition_filter is not None:
+        partition_values = partition_filter.partition_values
+
     partition = get_partition(stream.locator, partition_values, *args, **kwargs)
     delta_locator = DeltaLocator.of(partition.locator, stream_position)
 
@@ -312,22 +352,24 @@ def get_delta(
 def get_latest_delta(
     namespace: str,
     table_name: str,
-    partition_values: Optional[List[Any]] = None,
+    partition_values: Optional[PartitionValues] = None,
     table_version: Optional[str] = None,
     include_manifest: bool = False,
+    partition_filter: Optional[PartitionFilter] = None,
     *args,
     **kwargs,
 ) -> Optional[Delta]:
 
     deltas = list_deltas(
-        namespace,
-        table_name,
-        partition_values,
-        table_version,
-        None,
-        None,
-        False,
-        include_manifest,
+        namespace=namespace,
+        table_name=table_name,
+        partition_values=partition_values,
+        table_version=table_version,
+        first_stream_position=None,
+        last_stream_position=None,
+        ascending_order=False,
+        include_manifest=include_manifest,
+        partition_filter=partition_filter,
         *args,
         **kwargs,
     ).all_items()
@@ -347,13 +389,25 @@ def download_delta(
     file_reader_kwargs_provider: Optional[ReadKwargsProvider] = None,
     ray_options_provider: Callable[[int, Any], Dict[str, Any]] = None,
     distributed_dataset_type: DistributedDatasetType = DistributedDatasetType.RAY_DATASET,
+    partition_filter: Optional[PartitionFilter] = None,
     *args,
     **kwargs,
 ) -> Union[LocalDataset, DistributedDataset]:  # type: ignore
     result = []
-    manifest = get_delta_manifest(delta_like, *args, **kwargs)
-
+    if isinstance(delta_like, Delta) and delta_like.manifest is not None:
+        manifest = Delta(delta_like).manifest
+    else:
+        manifest = get_delta_manifest(delta_like, *args, **kwargs)
+    partition_values: PartitionValues = None
+    if partition_filter is not None:
+        partition_values = partition_filter.partition_values
     for entry_index in range(len(manifest.entries)):
+        if (
+            partition_values is not None
+            and partition_values != manifest.entries[entry_index].meta.partition_values
+        ):
+            continue
+
         result.append(
             download_delta_manifest_entry(
                 delta_like=delta_like,
@@ -387,8 +441,10 @@ def download_delta_manifest_entry(
     **kwargs,
 ) -> LocalTable:
     cur, con = _get_sqlite3_cursor_con(kwargs)
-
-    manifest = get_delta_manifest(delta_like, *args, **kwargs)
+    if isinstance(delta_like, Delta) and delta_like.manifest is not None:
+        manifest = Delta(delta_like).manifest
+    else:
+        manifest = get_delta_manifest(delta_like, *args, **kwargs)
     if entry_index >= len(manifest.entries):
         raise IndexError(
             f"Manifest entry index {entry_index} does not exist. "
@@ -508,10 +564,28 @@ def create_table_version(
     table_description: Optional[str] = None,
     table_properties: Optional[Dict[str, str]] = None,
     supported_content_types: Optional[List[ContentType]] = None,
+    partition_spec: Optional[StreamPartitionSpec] = None,
     *args,
     **kwargs,
 ) -> Stream:
     cur, con = _get_sqlite3_cursor_con(kwargs)
+
+    if partition_keys is not None and partition_spec is not None:
+        raise ValueError(
+            "Only one of partition_keys or partition_spec must be provided"
+        )
+    if partition_spec is not None:
+        assert (
+            partition_spec.ordered_transforms is not None
+        ), "Ordered transforms must be specified when partition_spec is specified"
+        partition_keys = []
+        for transform in partition_spec.ordered_transforms:
+            assert transform.name == TransformName.IDENTITY, (
+                "Local DeltaCAT storage does not support creating table versions "
+                "with non identity transform partition spec"
+            )
+            transform_params: IdentityTransformParameters = transform.parameters
+            partition_keys.append(transform_params.column_name)
 
     latest_version = get_latest_table_version(namespace, table_name, *args, **kwargs)
     if (
@@ -760,7 +834,7 @@ def delete_stream(
 
 
 def stage_partition(
-    stream: Stream, partition_values: Optional[List[Any]] = None, *args, **kwargs
+    stream: Stream, partition_values: Optional[PartitionValues] = None, *args, **kwargs
 ) -> Partition:
     cur, con = _get_sqlite3_cursor_con(kwargs)
     partition_id = uuid.uuid4().__str__()
@@ -798,30 +872,55 @@ def stage_partition(
     return partition
 
 
-def commit_partition(partition: Partition, *args, **kwargs) -> Partition:
+def commit_partition(
+    partition: Partition,
+    previous_partition: Optional[Partition] = None,
+    *args,
+    **kwargs,
+) -> Partition:
     cur, con = _get_sqlite3_cursor_con(kwargs)
-    pv_partition = get_partition(
+    pv_partition: Optional[Partition] = previous_partition or get_partition(
         partition.stream_locator,
         partition_values=partition.partition_values,
         *args,
         **kwargs,
     )
-
-    # deprecate old and commit new one
+    # deprecate old partition and commit new one
     if pv_partition:
         pv_partition.state = CommitState.DEPRECATED
         params = (json.dumps(pv_partition), pv_partition.locator.canonical_string())
         cur.execute("UPDATE partitions SET value = ? WHERE locator = ?", params)
+    previous_partition_deltas = (
+        list_partition_deltas(
+            pv_partition, ascending_order=False, *args, **kwargs
+        ).all_items()
+        or []
+    )
 
-    deltas = list_partition_deltas(partition, *args, **kwargs).all_items()
-    deltas.sort(reverse=True, key=lambda x: x.stream_position)
+    partition_deltas: Optional[List[Delta]] = (
+        list_partition_deltas(
+            partition, ascending_order=False, *args, **kwargs
+        ).all_items()
+        or []
+    )
 
-    stream_position = partition.stream_position
-    if deltas:
-        stream_position = deltas[0].stream_position
+    # if previous_partition is passed in, table is in-place compacted and we need to run merge-and-promote
+    if previous_partition:
+        partition_deltas = _merge_and_promote(
+            partition_deltas, previous_partition_deltas
+        )
+
+    stream_position = (
+        partition_deltas[0].stream_position
+        if partition_deltas
+        else partition.stream_position
+    )
+
+    partition.stream_position = stream_position
+    if partition_deltas:
+        partition.locator = partition_deltas[0].partition_locator
 
     partition.state = CommitState.COMMITTED
-    partition.stream_position = stream_position
     partition.previous_stream_position = (
         pv_partition.stream_position if pv_partition else None
     )
@@ -836,7 +935,7 @@ def delete_partition(
     namespace: str,
     table_name: str,
     table_version: Optional[str] = None,
-    partition_values: Optional[List[Any]] = None,
+    partition_values: Optional[PartitionValues] = None,
     *args,
     **kwargs,
 ) -> None:
@@ -853,7 +952,7 @@ def delete_partition(
 
 def get_partition(
     stream_locator: StreamLocator,
-    partition_values: Optional[List[Any]] = None,
+    partition_values: Optional[PartitionValues] = None,
     *args,
     **kwargs,
 ) -> Optional[Partition]:
@@ -894,12 +993,14 @@ def stage_delta(
     s3_table_writer_kwargs: Optional[Dict[str, Any]] = None,
     content_type: ContentType = ContentType.PARQUET,
     delete_parameters: Optional[DeleteParameters] = None,
+    partition_spec: Optional[DeltaPartitionSpec] = None,
+    partition_values: Optional[PartitionValues] = None,
     *args,
     **kwargs,
 ) -> Delta:
     cur, con = _get_sqlite3_cursor_con(kwargs)
-    manifest_entry_id = uuid.uuid4().__str__()
-    uri = _get_manifest_entry_uri(manifest_entry_id)
+    manifest_id = uuid.uuid4().__str__()
+    uri = _get_manifest_entry_uri(manifest_id)
 
     if data is None:
         delta = create_empty_delta(
@@ -907,13 +1008,19 @@ def stage_delta(
             delta_type,
             author,
             properties=properties,
-            manifest_entry_id=manifest_entry_id,
+            manifest_entry_id=manifest_id,
         )
         cur.execute("INSERT OR IGNORE INTO data VALUES (?, ?)", (uri, None))
         params = (delta.locator.canonical_string(), "staged_delta", json.dumps(delta))
         cur.execute("INSERT OR IGNORE INTO deltas VALUES (?, ?, ?)", params)
         con.commit()
         return delta
+
+    if partition_spec:
+        assert partition_values is not None, (
+            "partition_values must be provided as local "
+            "storage does not support computing it from input data"
+        )
 
     serialized_data = None
     if content_type == ContentType.PARQUET:
@@ -939,18 +1046,19 @@ def stage_delta(
         content_type=content_type,
         content_encoding=ContentEncoding.IDENTITY,
         source_content_length=data.nbytes,
+        partition_values=partition_values,
     )
 
     manifest = Manifest.of(
         entries=ManifestEntryList.of(
             [
                 ManifestEntry.of(
-                    uri=uri, url=uri, meta=meta, mandatory=True, uuid=manifest_entry_id
+                    uri=uri, url=uri, meta=meta, mandatory=True, uuid=manifest_id
                 )
             ]
         ),
         author=author,
-        uuid=manifest_entry_id,
+        uuid=manifest_id,
     )
 
     delta = Delta.of(
@@ -975,9 +1083,8 @@ def stage_delta(
 
 def commit_delta(delta: Delta, *args, **kwargs) -> Delta:
     cur, con = _get_sqlite3_cursor_con(kwargs)
-
-    if not delta.stream_position:
-        delta.locator.stream_position = current_time_ms()
+    delta_stream_position: Optional[int] = delta.stream_position
+    delta.locator.stream_position = delta_stream_position or current_time_ms()
 
     params = (
         delta.locator.canonical_string(),
@@ -995,9 +1102,7 @@ def commit_delta(delta: Delta, *args, **kwargs) -> Delta:
     cur.execute(
         "UPDATE deltas SET partition_locator = ?, value = ? WHERE locator = ?", params
     )
-
     con.commit()
-
     return delta
 
 
@@ -1143,3 +1248,15 @@ def get_table_version_column_names(
     **kwargs,
 ) -> Optional[List[str]]:
     raise NotImplementedError("Fetching column names is not supported")
+
+
+def can_categorize(e: BaseException, **kwargs) -> bool:
+    if isinstance(e, InvalidNamespaceError):
+        return True
+    else:
+        return False
+
+
+def raise_categorized_error(e: BaseException, **kwargs):
+    if isinstance(e, InvalidNamespaceError):
+        raise LocalStorageValidationError("Namespace provided is invalid!")

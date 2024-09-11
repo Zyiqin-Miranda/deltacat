@@ -37,6 +37,19 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from deltacat.types.media import StorageType
 from deltacat.storage import (
     DeltaType,
+    DeltaLocator,
+    Partition,
+    PartitionLocator,
+)
+from deltacat.types.media import ContentType
+from deltacat.compute.compactor.model.compact_partition_params import (
+    CompactPartitionParams,
+)
+from deltacat.utils.placement import (
+    PlacementGroupManager,
+)
+from deltacat.compute.compactor.model.compaction_session_audit_info import (
+    CompactionSessionAuditInfo,
 )
 
 DATABASE_FILE_PATH_KEY, DATABASE_FILE_PATH_VALUE = (
@@ -54,6 +67,7 @@ MODULE scoped fixtures
 def setup_ray_cluster():
     ray.init(local_mode=True, ignore_reinit_error=True)
     yield
+    ray.shutdown()
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -74,14 +88,14 @@ def cleanup_the_database_file_after_all_compaction_session_package_tests_complet
 
 
 @pytest.fixture(scope="module")
-def setup_s3_resource(mock_aws_credential):
+def s3_resource(mock_aws_credential):
     with mock_s3():
         yield boto3.resource("s3")
 
 
 @pytest.fixture(autouse=True, scope="module")
-def setup_compaction_artifacts_s3_bucket(setup_s3_resource: ServiceResource):
-    setup_s3_resource.create_bucket(
+def setup_compaction_artifacts_s3_bucket(s3_resource: ServiceResource):
+    s3_resource.create_bucket(
         ACL="authenticated-read",
         Bucket=TEST_S3_RCF_BUCKET_NAME,
     )
@@ -115,15 +129,18 @@ def local_deltacat_storage_kwargs(request: pytest.FixtureRequest):
         "input_deltas_delta_type",
         "expected_terminal_compact_partition_result",
         "expected_terminal_exception",
+        "expected_terminal_exception_message",
         "create_placement_group_param",
         "records_per_compacted_file_param",
         "hash_bucket_count_param",
         "read_kwargs_provider_param",
         "drop_duplicates_param",
         "skip_enabled_compact_partition_drivers",
+        "assert_compaction_audit",
         "incremental_deltas",
         "rebase_expected_compact_partition_result",
         "compact_partition_func",
+        "compactor_version",
     ],
     [
         (
@@ -136,15 +153,18 @@ def local_deltacat_storage_kwargs(request: pytest.FixtureRequest):
             input_deltas_delta_type,
             expected_terminal_compact_partition_result,
             expected_terminal_exception,
+            expected_terminal_exception_message,
             create_placement_group_param,
             records_per_compacted_file_param,
             hash_bucket_count_param,
             drop_duplicates_param,
             read_kwargs_provider,
             skip_enabled_compact_partition_drivers,
+            assert_compaction_audit,
             incremental_deltas,
             rebase_expected_compact_partition_result,
             compact_partition_func,
+            compactor_version,
         )
         for test_name, (
             primary_keys,
@@ -155,21 +175,24 @@ def local_deltacat_storage_kwargs(request: pytest.FixtureRequest):
             input_deltas_delta_type,
             expected_terminal_compact_partition_result,
             expected_terminal_exception,
+            expected_terminal_exception_message,
             create_placement_group_param,
             records_per_compacted_file_param,
             hash_bucket_count_param,
             drop_duplicates_param,
             read_kwargs_provider,
             skip_enabled_compact_partition_drivers,
+            assert_compaction_audit,
             incremental_deltas,
             rebase_expected_compact_partition_result,
             compact_partition_func,
+            compactor_version,
         ) in REBASE_THEN_INCREMENTAL_TEST_CASES.items()
     ],
     ids=[test_name for test_name in REBASE_THEN_INCREMENTAL_TEST_CASES],
 )
 def test_compact_partition_rebase_then_incremental(
-    setup_s3_resource: ServiceResource,
+    s3_resource: ServiceResource,
     local_deltacat_storage_kwargs: Dict[str, Any],
     test_name: str,
     primary_keys: Set[str],
@@ -180,6 +203,7 @@ def test_compact_partition_rebase_then_incremental(
     input_deltas_delta_type: str,
     expected_terminal_compact_partition_result: pa.Table,
     expected_terminal_exception: BaseException,
+    expected_terminal_exception_message: Optional[str],
     create_placement_group_param: bool,
     records_per_compacted_file_param: int,
     hash_bucket_count_param: int,
@@ -188,29 +212,14 @@ def test_compact_partition_rebase_then_incremental(
     incremental_deltas: List[Tuple[pa.Table, DeltaType, Optional[Dict[str, str]]]],
     rebase_expected_compact_partition_result: pa.Table,
     skip_enabled_compact_partition_drivers: List[CompactorVersion],
+    assert_compaction_audit: Optional[Callable],
+    compactor_version: Optional[CompactorVersion],
     compact_partition_func: Callable,
     benchmark: BenchmarkFixture,
 ):
     import deltacat.tests.local_deltacat_storage as ds
-    from deltacat.types.media import ContentType
-    from deltacat.storage import (
-        DeltaLocator,
-        Partition,
-        PartitionLocator,
-    )
-    from deltacat.compute.compactor.model.compact_partition_params import (
-        CompactPartitionParams,
-    )
-    from deltacat.utils.placement import (
-        PlacementGroupManager,
-    )
-    from deltacat.compute.compactor.model.compaction_session_audit_info import (
-        CompactionSessionAuditInfo,
-    )
 
     ds_mock_kwargs = local_deltacat_storage_kwargs
-    ray.shutdown()
-    ray.init(local_mode=True, ignore_reinit_error=True)
     """
     REBASE
     """
@@ -276,7 +285,7 @@ def test_compact_partition_rebase_then_incremental(
     # execute
     rcf_file_s3_uri = benchmark(compact_partition_func, compact_partition_params)
     compacted_delta_locator: DeltaLocator = get_compacted_delta_locator_from_rcf(
-        setup_s3_resource, rcf_file_s3_uri
+        s3_resource, rcf_file_s3_uri
     )
     tables = ds.download_delta(
         compacted_delta_locator, storage_type=StorageType.LOCAL, **ds_mock_kwargs
@@ -337,20 +346,19 @@ def test_compact_partition_rebase_then_incremental(
         }
     )
     if expected_terminal_exception:
-        with pytest.raises(expected_terminal_exception):
+        with pytest.raises(expected_terminal_exception) as exc_info:
             compact_partition_func(compact_partition_params)
+        assert expected_terminal_exception_message in str(exc_info.value)
         return
     rcf_file_s3_uri = compact_partition_func(compact_partition_params)
-    round_completion_info = get_rcf(setup_s3_resource, rcf_file_s3_uri)
+    round_completion_info = get_rcf(s3_resource, rcf_file_s3_uri)
     compacted_delta_locator_incremental: DeltaLocator = (
         round_completion_info.compacted_delta_locator
     )
     audit_bucket, audit_key = round_completion_info.compaction_audit_url.replace(
         "s3://", ""
     ).split("/", 1)
-    compaction_audit_obj: dict = read_s3_contents(
-        setup_s3_resource, audit_bucket, audit_key
-    )
+    compaction_audit_obj: dict = read_s3_contents(s3_resource, audit_bucket, audit_key)
     compaction_audit: CompactionSessionAuditInfo = CompactionSessionAuditInfo(
         **compaction_audit_obj
     )
@@ -381,4 +389,8 @@ def test_compact_partition_rebase_then_incremental(
     assert actual_compacted_table.equals(
         expected_terminal_compact_partition_result
     ), f"{actual_compacted_table} does not match {expected_terminal_compact_partition_result}"
+
+    if assert_compaction_audit is not None:
+        if not assert_compaction_audit(compactor_version, compaction_audit):
+            assert False, "Compaction audit assertion failed"
     return

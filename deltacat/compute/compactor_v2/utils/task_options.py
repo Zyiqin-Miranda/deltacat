@@ -1,4 +1,3 @@
-import botocore
 import logging
 from typing import Dict, Optional, List, Tuple, Any
 from deltacat import logs
@@ -20,6 +19,7 @@ from deltacat.compute.compactor_v2.utils.primary_key_index import (
 from deltacat.compute.compactor_v2.constants import (
     PARQUET_TO_PYARROW_INFLATION,
 )
+from deltacat.exceptions import RetryableError
 
 logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
 
@@ -62,7 +62,12 @@ def get_task_options(
     cpu: float, memory: float, ray_custom_resources: Optional[Dict] = None
 ) -> Dict:
 
-    task_opts = {"num_cpus": cpu, "memory": memory}
+    # NOTE: With DEFAULT scheduling strategy in Ray 2.20.0, autoscaler does
+    # not spin up enough nodes fast and hence we see only approximately
+    # 20 tasks get scheduled out of 100 tasks in queue. Hence, we use SPREAD
+    # which is also ideal for merge and hash bucket tasks.
+    # https://docs.ray.io/en/latest/ray-core/scheduling/index.html
+    task_opts = {"num_cpus": cpu, "memory": memory, "scheduling_strategy": "SPREAD"}
 
     if ray_custom_resources:
         task_opts["resources"] = ray_custom_resources
@@ -71,12 +76,7 @@ def get_task_options(
 
     # List of possible botocore exceptions are available at
     # https://github.com/boto/botocore/blob/develop/botocore/exceptions.py
-    task_opts["retry_exceptions"] = [
-        botocore.exceptions.ConnectionError,
-        botocore.exceptions.HTTPClientError,
-        ConnectionError,
-        TimeoutError,
-    ]
+    task_opts["retry_exceptions"] = [RetryableError]
 
     return task_opts
 
@@ -145,7 +145,6 @@ def hash_bucket_resource_options_provider(
     size_bytes = 0.0
     num_rows = 0
     total_pk_size = 0
-
     if not item.manifest or not item.manifest.entries:
         logger.debug(
             f"[Hash bucket task {index}]: No manifest entries, skipping memory allocation calculation"

@@ -4,7 +4,15 @@ from functools import partial
 from typing import Any, Callable, Dict, Generator, List, Optional, Union
 from uuid import uuid4
 from botocore.config import Config
-from deltacat.aws.constants import BOTO_MAX_RETRIES
+from deltacat.aws.constants import (
+    BOTO_MAX_RETRIES,
+    UPLOAD_DOWNLOAD_RETRY_STOP_AFTER_DELAY,
+    BOTO_THROTTLING_ERROR_CODES,
+    RETRYABLE_TRANSIENT_ERRORS,
+    BOTO_TIMEOUT_ERROR_CODES,
+    UPLOAD_SLICED_TABLE_RETRY_STOP_AFTER_DELAY,
+    DOWNLOAD_MANIFEST_ENTRY_RETRY_STOP_AFTER_DELAY,
+)
 
 import pyarrow as pa
 import ray
@@ -13,24 +21,17 @@ from boto3.resources.base import ServiceResource
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 from ray.data.block import Block, BlockAccessor, BlockMetadata
-from ray.data.datasource import BlockWritePathProvider
+from ray.data.datasource import FilenameProvider
 from ray.types import ObjectRef
 from tenacity import (
     Retrying,
     retry_if_exception_type,
-    retry_if_not_exception_type,
     stop_after_delay,
     wait_random_exponential,
 )
 from deltacat.utils.ray_utils.concurrency import invoke_parallel
 import deltacat.aws.clients as aws_utils
 from deltacat import logs
-from deltacat.aws.constants import (
-    TIMEOUT_ERROR_CODES,
-    DOWNLOAD_MANIFEST_ENTRY_METRIC_PREFIX,
-    UPLOAD_SLICED_TABLE_METRIC_PREFIX,
-)
-from deltacat.exceptions import NonRetryableError, RetryableError
 from deltacat.storage import (
     DistributedDataset,
     LocalDataset,
@@ -52,14 +53,22 @@ from deltacat.types.tables import (
     DISTRIBUTED_DATASET_TYPE_TO_READER_FUNC,
     get_table_length,
 )
+from deltacat.exceptions import (
+    RetryableError,
+    RetryableUploadTableError,
+    RetryableDownloadTableError,
+    RetryableDownloadFileError,
+    RetryableUploadFileError,
+    NonRetryableDownloadFileError,
+    NonRetryableUploadFileError,
+    NonRetryableUploadTableError,
+    NonRetryableDownloadTableError,
+)
 from deltacat.types.partial_download import PartialFileDownloadParams
 from deltacat.utils.common import ReadKwargsProvider
-from deltacat.utils.metrics import metrics
+from deltacat.exceptions import categorize_errors
 
 logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
-
-# TODO(raghumdani): refactor redshift datasource to reuse the
-# same module for writing output files.
 
 
 class CapturedBlockWritePaths:
@@ -88,12 +97,15 @@ class CapturedBlockWritePaths:
         return self._block_refs
 
 
-class UuidBlockWritePathProvider(BlockWritePathProvider):
+class UuidBlockWritePathProvider(FilenameProvider):
     """Block write path provider implementation that writes each
     dataset block out to a file of the form: {base_path}/{uuid}
     """
 
-    def __init__(self, capture_object: CapturedBlockWritePaths):
+    def __init__(
+        self, capture_object: CapturedBlockWritePaths, base_path: Optional[str] = None
+    ):
+        self.base_path = base_path
         self.write_paths: List[str] = []
         self.block_refs: List[ObjectRef[Block]] = []
         self.capture_object = capture_object
@@ -104,6 +116,19 @@ class UuidBlockWritePathProvider(BlockWritePathProvider):
                 self.write_paths,
                 self.block_refs,
             )
+
+    def get_filename_for_block(
+        self, block: Any, task_index: int, block_index: int
+    ) -> str:
+        if self.base_path is None:
+            raise ValueError(
+                "Base path must be provided to UuidBlockWritePathProvider",
+            )
+        return self._get_write_path_for_block(
+            base_path=self.base_path,
+            block=block,
+            block_index=block_index,
+        )
 
     def _get_write_path_for_block(
         self,
@@ -120,6 +145,25 @@ class UuidBlockWritePathProvider(BlockWritePathProvider):
         if block:
             self.block_refs.append(block)
         return write_path
+
+    def __call__(
+        self,
+        base_path: str,
+        *,
+        filesystem: Optional[pa.filesystem.FileSystem] = None,
+        dataset_uuid: Optional[str] = None,
+        block: Optional[ObjectRef[Block]] = None,
+        block_index: Optional[int] = None,
+        file_format: Optional[str] = None,
+    ) -> str:
+        return self._get_write_path_for_block(
+            base_path,
+            filesystem=filesystem,
+            dataset_uuid=dataset_uuid,
+            block=block,
+            block_index=block_index,
+            file_format=file_format,
+        )
 
 
 class S3Url:
@@ -204,6 +248,7 @@ def filter_objects_by_prefix(
         more_objects_to_list = params["ContinuationToken"] is not None
 
 
+@categorize_errors
 def read_file(
     s3_url: str,
     content_type: ContentType,
@@ -230,20 +275,33 @@ def read_file(
         )
         return table
     except ClientError as e:
-        if e.response["Error"]["Code"] in TIMEOUT_ERROR_CODES:
+        if (
+            e.response["Error"]["Code"]
+            in BOTO_TIMEOUT_ERROR_CODES | BOTO_THROTTLING_ERROR_CODES
+        ):
             # Timeout error not caught by botocore
-            raise RetryableError(f"Retry table download from: {s3_url}") from e
-        raise NonRetryableError(f"Failed table download from: {s3_url}") from e
+            raise RetryableDownloadTableError(
+                f"Retry table download from: {s3_url} after receiving {type(e).__name__}",
+            ) from e
+        raise NonRetryableDownloadTableError(
+            f"Failed table download from: {s3_url} after receiving {type(e).__name__}"
+        ) from e
+    except RETRYABLE_TRANSIENT_ERRORS as e:
+        raise RetryableDownloadTableError(
+            f"Retry download for: {s3_url} after receiving {type(e).__name__}"
+        ) from e
     except BaseException as e:
         logger.warn(
             f"Read has failed for {s3_url} and content_type={content_type} "
             f"and encoding={content_encoding}. Error: {e}",
             exc_info=True,
         )
-        raise e
+        raise NonRetryableDownloadTableError(
+            f"Read has failed for {s3_url} and content_type={content_type} "
+            f"and encoding={content_encoding}",
+        ) from e
 
 
-@metrics(prefix=UPLOAD_SLICED_TABLE_METRIC_PREFIX)
 def upload_sliced_table(
     table: Union[LocalTable, DistributedDataset],
     s3_url_prefix: str,
@@ -259,7 +317,7 @@ def upload_sliced_table(
     # @retry decorator can't be pickled by Ray, so wrap upload in Retrying
     retrying = Retrying(
         wait=wait_random_exponential(multiplier=1, max=60),
-        stop=stop_after_delay(30 * 60),
+        stop=stop_after_delay(UPLOAD_SLICED_TABLE_RETRY_STOP_AFTER_DELAY),
         retry=retry_if_exception_type(RetryableError),
     )
 
@@ -293,7 +351,6 @@ def upload_sliced_table(
                 **s3_client_kwargs,
             )
             manifest_entries.extend(slice_entries)
-
     return manifest_entries
 
 
@@ -341,18 +398,34 @@ def upload_table(
         except ClientError as e:
             if e.response["Error"]["Code"] == "NoSuchKey":
                 # s3fs may swallow S3 errors - we were probably throttled
-                raise RetryableError(f"Retry table upload to: {s3_url}") from e
-            raise NonRetryableError(f"Failed table upload to: {s3_url}") from e
+                raise RetryableUploadTableError(
+                    f"Retry table upload from: {s3_url} after receiving {type(e).__name__}",
+                ) from e
+            if (
+                e.response["Error"]["Code"]
+                in BOTO_TIMEOUT_ERROR_CODES | BOTO_THROTTLING_ERROR_CODES
+            ):
+                raise RetryableUploadTableError(
+                    f"Retry table upload from: {s3_url} after receiving {type(e).__name__}",
+                ) from e
+            raise NonRetryableUploadTableError(
+                f"Failed table upload to: {s3_url} after receiving {type(e).__name__}",
+            ) from e
+        except RETRYABLE_TRANSIENT_ERRORS as e:
+            raise RetryableUploadTableError(
+                f"Retry upload for: {s3_url} after receiving {type(e).__name__}",
+            ) from e
         except BaseException as e:
             logger.warn(
                 f"Upload has failed for {s3_url} and content_type={content_type}. Error: {e}",
                 exc_info=True,
             )
-            raise e
+            raise NonRetryableUploadTableError(
+                f"Upload has failed for {s3_url} and content_type={content_type} because of {type(e).__name__}",
+            ) from e
     return manifest_entries
 
 
-@metrics(prefix=DOWNLOAD_MANIFEST_ENTRY_METRIC_PREFIX)
 def download_manifest_entry(
     manifest_entry: ManifestEntry,
     token_holder: Optional[Dict[str, Any]] = None,
@@ -391,8 +464,8 @@ def download_manifest_entry(
     # @retry decorator can't be pickled by Ray, so wrap download in Retrying
     retrying = Retrying(
         wait=wait_random_exponential(multiplier=1, max=60),
-        stop=stop_after_delay(30 * 60),
-        retry=retry_if_not_exception_type(NonRetryableError),
+        stop=stop_after_delay(DOWNLOAD_MANIFEST_ENTRY_RETRY_STOP_AFTER_DELAY),
+        retry=retry_if_exception_type(RetryableError),
     )
     table = retrying(
         read_file,
@@ -483,41 +556,90 @@ def download_manifest_entries_distributed(
 
 def upload(s3_url: str, body, **s3_client_kwargs) -> Dict[str, Any]:
 
-    # TODO (pdames): add tenacity retrying
     parsed_s3_url = parse_s3_url(s3_url)
     s3 = s3_client_cache(None, **s3_client_kwargs)
-    return s3.put_object(
-        Body=body,
-        Bucket=parsed_s3_url.bucket,
-        Key=parsed_s3_url.key,
+    retrying = Retrying(
+        wait=wait_random_exponential(multiplier=1, max=15),
+        stop=stop_after_delay(UPLOAD_DOWNLOAD_RETRY_STOP_AFTER_DELAY),
+        retry=retry_if_exception_type(RetryableError),
     )
+    return retrying(
+        _put_object,
+        s3,
+        body,
+        parsed_s3_url.bucket,
+        parsed_s3_url.key,
+    )
+
+
+def _put_object(
+    s3_client, body: Any, bucket: str, key: str, **s3_put_object_kwargs
+) -> Dict[str, Any]:
+    try:
+        return s3_client.put_object(
+            Body=body, Bucket=bucket, Key=key, **s3_put_object_kwargs
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] in BOTO_THROTTLING_ERROR_CODES:
+            error_code = e.response["Error"]["Code"]
+            raise RetryableUploadFileError(
+                f"Retry upload for: {bucket}/{key} after receiving {error_code}",
+            ) from e
+        raise NonRetryableUploadFileError(
+            f"Failed table upload to: {bucket}/{key}"
+        ) from e
+    except RETRYABLE_TRANSIENT_ERRORS as e:
+        raise RetryableUploadFileError(
+            f"Retry upload for: {bucket}/{key} after receiving {type(e).__name__}"
+        ) from e
+    except BaseException as e:
+        logger.error(
+            f"Upload has failed for {bucket}/{key}. Error: {type(e).__name__}",
+            exc_info=True,
+        )
+        raise NonRetryableUploadFileError(
+            f"Failed table upload to: {bucket}/{key}"
+        ) from e
 
 
 def download(
     s3_url: str, fail_if_not_found: bool = True, **s3_client_kwargs
 ) -> Optional[Dict[str, Any]]:
 
-    # TODO (pdames): add tenacity retrying
     parsed_s3_url = parse_s3_url(s3_url)
     s3 = s3_client_cache(None, **s3_client_kwargs)
+    retrying = Retrying(
+        wait=wait_random_exponential(multiplier=1, max=15),
+        stop=stop_after_delay(UPLOAD_DOWNLOAD_RETRY_STOP_AFTER_DELAY),
+        retry=retry_if_exception_type(RetryableError),
+    )
+    return retrying(
+        _get_object,
+        s3,
+        parsed_s3_url.bucket,
+        parsed_s3_url.key,
+        fail_if_not_found=fail_if_not_found,
+    )
+
+
+def _get_object(s3_client, bucket: str, key: str, fail_if_not_found: bool = True):
     try:
-        return s3.get_object(
-            Bucket=parsed_s3_url.bucket,
-            Key=parsed_s3_url.key,
+        return s3_client.get_object(
+            Bucket=bucket,
+            Key=key,
         )
     except ClientError as e:
-        if fail_if_not_found:
-            raise
-        else:
-            if e.response["Error"]["Code"] != "404":
-                if e.response["Error"]["Code"] != "NoSuchKey":
-                    raise
-            logger.info(f"file not found: {s3_url}")
-    except s3.exceptions.NoSuchKey:
-        if fail_if_not_found:
-            raise
-        else:
-            logger.info(f"file not found: {s3_url}")
+        if e.response["Error"]["Code"] == "NoSuchKey":
+            if fail_if_not_found:
+                raise NonRetryableDownloadFileError(
+                    f"Failed get object from: {bucket}/{key}"
+                ) from e
+            logger.info(f"file not found: {bucket}/{key}")
+    except RETRYABLE_TRANSIENT_ERRORS as e:
+        raise RetryableDownloadFileError(
+            f"Retry get object: {bucket}/{key} after receiving {type(e).__name__}"
+        ) from e
+
     return None
 
 

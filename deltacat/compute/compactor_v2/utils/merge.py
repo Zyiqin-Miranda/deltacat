@@ -31,14 +31,11 @@ from deltacat.compute.compactor_v2.deletes.delete_strategy import (
 from deltacat.compute.compactor_v2.deletes.delete_file_envelope import (
     DeleteFileEnvelope,
 )
-from deltacat.utils.metrics import metrics
-from deltacat.compute.compactor_v2.constants import MATERIALIZE_METRIC_PREFIX
 
 
 logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
 
 
-@metrics(prefix=MATERIALIZE_METRIC_PREFIX)
 def materialize(
     input: MergeInput,
     task_index: int,
@@ -112,7 +109,6 @@ def generate_local_merge_input(
         A MergeInput object
 
     """
-
     return MergeInput.of(
         merge_file_groups_provider=LocalMergeFileGroupsProvider(
             annotated_deltas,
@@ -136,4 +132,5 @@ def generate_local_merge_input(
         deltacat_storage_kwargs=params.deltacat_storage_kwargs,
         delete_strategy=delete_strategy,
         delete_file_envelopes=delete_file_envelopes,
+        disable_copy_by_reference=params.disable_copy_by_reference,
     )

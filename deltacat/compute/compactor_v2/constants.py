@@ -41,6 +41,9 @@ DROP_DUPLICATES = True
 # size in metadata to pyarrow table size.
 PARQUET_TO_PYARROW_INFLATION = 4
 
+# By default, copy by reference is enabled
+DEFAULT_DISABLE_COPY_BY_REFERENCE = False
+
 # Metric Names
 # Time taken for a hash bucket task
 HASH_BUCKET_TIME_IN_SECONDS = "hash_bucket_time"
@@ -66,5 +69,9 @@ DISCOVER_DELTAS_METRIC_PREFIX = "discover_deltas"
 # Metric prefix for prepare deletes
 PREPARE_DELETES_METRIC_PREFIX = "prepare_deletes"
 
-# Metric prefix for materialize
-MATERIALIZE_METRIC_PREFIX = "delta_materialize"
+# Metric prefix for compact partition method
+COMPACT_PARTITION_METRIC_PREFIX = "compact_partition"
+
+# Number of rounds to run hash/merge for a single
+# partition. (For large table support)
+DEFAULT_NUM_ROUNDS = 1

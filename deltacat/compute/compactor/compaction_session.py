@@ -193,6 +193,7 @@ def compact_partition(
             round_completion_file_s3_url = rcf.write_round_completion_file(
                 compaction_artifact_s3_bucket,
                 new_rcf_partition_locator,
+                partition.locator,
                 new_rci,
                 **s3_client_kwargs,
             )
@@ -312,7 +313,10 @@ def _execute_compaction_round(
     round_completion_info = None
     if not rebase_source_partition_locator:
         round_completion_info = rcf.read_round_completion_file(
-            compaction_artifact_s3_bucket, source_partition_locator, **s3_client_kwargs
+            compaction_artifact_s3_bucket,
+            source_partition_locator,
+            destination_partition_locator,
+            **s3_client_kwargs,
         )
         if not round_completion_info:
             logger.info(
@@ -684,8 +688,9 @@ def _execute_compaction_round(
         session_peak_memory
     )
 
-    compaction_audit.save_round_completion_stats(
-        mat_results, telemetry_time_hb + telemetry_time_dd + telemetry_time_materialize
+    compaction_audit.save_round_completion_stats(mat_results)
+    compaction_audit.set_telemetry_time_in_seconds(
+        telemetry_time_hb + telemetry_time_dd + telemetry_time_materialize
     )
 
     s3_utils.upload(

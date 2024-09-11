@@ -6,9 +6,9 @@ import gzip
 import io
 import logging
 from functools import partial
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 from pyarrow.parquet import ParquetFile
-from deltacat.exceptions import ValidationError
+from deltacat.exceptions import ContentTypeValidationError
 
 import pyarrow as pa
 import numpy as np
@@ -18,7 +18,7 @@ from pyarrow import csv as pacsv
 from pyarrow import feather as paf
 from pyarrow import json as pajson
 from pyarrow import parquet as papq
-from ray.data.datasource import BlockWritePathProvider
+from ray.data.datasource import FilenameProvider
 from deltacat.utils.s3fs import create_s3_file_system
 
 from deltacat import logs
@@ -245,6 +245,7 @@ class ReadKwargsProviderPyArrowSchemaOverride(ContentTypeKwargsProvider):
         schema: Optional[pa.Schema] = None,
         pq_coerce_int96_timestamp_unit: Optional[str] = None,
         parquet_reader_type: Optional[str] = None,
+        file_read_timeout_ms: Optional[int] = None,
     ):
         """
 
@@ -258,6 +259,7 @@ class ReadKwargsProviderPyArrowSchemaOverride(ContentTypeKwargsProvider):
         self.schema = schema
         self.pq_coerce_int96_timestamp_unit = pq_coerce_int96_timestamp_unit
         self.parquet_reader_type = parquet_reader_type
+        self.file_read_timeout_ms = file_read_timeout_ms
 
     def _get_kwargs(self, content_type: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         if content_type in DELIMITED_TEXT_CONTENT_TYPES:
@@ -281,6 +283,8 @@ class ReadKwargsProviderPyArrowSchemaOverride(ContentTypeKwargsProvider):
                 kwargs["reader_type"] = self.parquet_reader_type
             else:
                 kwargs["reader_type"] = "daft"
+
+            kwargs["file_timeout_ms"] = self.file_read_timeout_ms
 
         return kwargs
 
@@ -476,10 +480,9 @@ def s3_file_to_parquet(
         content_type != ContentType.PARQUET.value
         or content_encoding != ContentEncoding.IDENTITY
     ):
-        raise ValidationError(
-            f"S3 file with content type: {content_type} and "
-            f"content encoding: {content_encoding} cannot be read"
-            "into pyarrow.parquet.ParquetFile"
+        raise ContentTypeValidationError(
+            f"S3 file with content type: {content_type} and content encoding: {content_encoding} "
+            "cannot be read into pyarrow.parquet.ParquetFile"
         )
 
     if s3_client_kwargs is None:
@@ -520,7 +523,7 @@ def table_to_file(
     table: pa.Table,
     base_path: str,
     file_system: AbstractFileSystem,
-    block_path_provider: BlockWritePathProvider,
+    block_path_provider: Union[Callable, FilenameProvider],
     content_type: str = ContentType.PARQUET.value,
     **kwargs,
 ) -> None:
