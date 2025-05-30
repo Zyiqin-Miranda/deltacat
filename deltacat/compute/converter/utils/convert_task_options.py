@@ -1,5 +1,7 @@
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple, Any
 from deltacat.exceptions import RetryableError
+from pyiceberg.manifest import DataFile
+from deltacat.compute.converter.model.convert_input_files import ConvertInputFiles
 
 AVERAGE_FILE_PATH_COLUMN_SIZE_BYTES = 80
 AVERAGE_POS_COLUMN_SIZE_BYTES = 4
@@ -36,7 +38,10 @@ def estimate_iceberg_pos_delete_additional_columns(
     return total_additional_columns_sizes
 
 
-def estimate_convert_remote_option_resources(data_files, equality_delete_files):
+def estimate_convert_remote_option_resources(
+    data_files: List[List[Tuple[int, DataFile]]],
+    equality_delete_files: List[List[Tuple[int, DataFile]]],
+) -> float:
     data_file_record_count = get_total_record_from_iceberg_files(data_files)
     equality_delete_record_count = get_total_record_from_iceberg_files(
         equality_delete_files
@@ -95,7 +100,9 @@ def estimate_dedupe_memory(all_data_files_for_dedupe):
     return memory_with_buffer
 
 
-def convert_resource_options_provider(index, convert_input_files):
+def convert_resource_options_provider(
+    index: int, convert_input_files: ConvertInputFiles
+) -> Dict[str, Any]:
     applicable_data_files = convert_input_files.applicable_data_files
     applicable_equality_delete_files = (
         convert_input_files.applicable_equality_delete_files

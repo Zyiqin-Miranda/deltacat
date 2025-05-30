@@ -4,14 +4,14 @@ from tenacity import (
     stop_after_delay,
     wait_random_exponential,
 )
-from typing import Union
+from typing import Union, Optional
 from deltacat.aws.s3u import CapturedBlockWritePaths, UuidBlockWritePathProvider
 from deltacat.types.tables import (
     get_table_writer,
     get_table_length,
     TABLE_CLASS_TO_SLICER_FUNC,
 )
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 from deltacat.exceptions import RetryableError
 from deltacat.storage import (
     DistributedDataset,
@@ -117,7 +117,7 @@ def upload_table_with_retry(
     return s3_write_paths
 
 
-def construct_s3_url(path):
+def construct_s3_url(path: Optional[str]) -> str:
     if path:
         return f"s3://{path}"
 

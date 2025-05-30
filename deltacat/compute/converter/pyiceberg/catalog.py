@@ -1,4 +1,6 @@
 from typing import Optional
+from pyiceberg.table import Table
+from pyiceberg.catalog import Catalog
 
 
 def load_catalog(iceberg_catalog_name, iceberg_catalog_properties):
@@ -27,7 +29,7 @@ def get_bucket_name():
     return "metadata-py4j-zyiqin1"
 
 
-def get_s3_prefix():
+def get_s3_prefix() -> str:
     return get_s3_path(get_bucket_name())
 
 
@@ -70,6 +72,6 @@ def get_glue_catalog():
     return glue_catalog
 
 
-def load_table(catalog, table_name):
+def load_table(catalog: Catalog, table_name: str) -> Table:
     loaded_table = catalog.load_table(table_name)
     return loaded_table

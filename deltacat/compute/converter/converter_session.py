@@ -12,7 +12,7 @@ from deltacat import logs
 from deltacat.compute.converter.model.converter_session_params import (
     ConverterSessionParams,
 )
-
+from typing import Any
 
 from deltacat.compute.converter.constants import DEFAULT_MAX_PARALLEL_DATA_FILE_DOWNLOAD
 from deltacat.compute.converter.steps.convert import convert
@@ -35,11 +35,9 @@ from deltacat.compute.converter.utils.converter_session_utils import (
 logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
 
 
-def converter_session(params: ConverterSessionParams, **kwargs):
+def converter_session(params: ConverterSessionParams, **kwargs: Any) -> None:
     """
-    Convert equality delete to position delete.
-    Compute and memory heavy work from downloading equality delete table and compute position deletes
-    will be executed on Ray remote tasks.
+    Convert equality deletes to position deletes with option to enforce primary key uniqueness.
     """
 
     catalog = params.catalog
@@ -170,7 +168,7 @@ def converter_session(params: ConverterSessionParams, **kwargs):
     else:
         commit_replace_snapshot(
             iceberg_table=iceberg_table,
-            to_be_deleted_files_list=to_be_deleted_files_list,
+            to_be_deleted_files=to_be_deleted_files_list,
             new_position_delete_files=to_be_added_files_list,
         )
     logger.info(
