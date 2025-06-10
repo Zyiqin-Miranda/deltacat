@@ -16,6 +16,8 @@ gcsfs == 2025.3.2
 google-cloud-storage
 
 intervaltree == 3.1.0
+
+mmh3>=3.0.0  # MurmurHash3 for Bloom filter
 msgpack ~= 1.0.7
 
 numpy == 1.22.4
