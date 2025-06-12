@@ -18,8 +18,8 @@ class ConverterSessionParams(dict):
         params = {} if params is None else params
         assert params.get("catalog") is not None, "catalog is a required arg"
         assert (
-            params.get("iceberg_table_name") is not None
-        ), "iceberg_table_name is a required arg"
+            params.get("iceberg_read_from_table_name") is not None
+        ), "iceberg_read_from_table_name is a required arg"
         assert (
             params.get("iceberg_warehouse_bucket_name") is not None
         ), "iceberg_warehouse_bucket_name is a required arg"
@@ -44,6 +44,7 @@ class ConverterSessionParams(dict):
         result.s3_client_kwargs = params.get("s3_client_kwargs", {})
         result.s3_file_system = params.get("s3_file_system", None)
         result.s3_prefix_override = params.get("s3_prefix_override", None)
+        result.write_to_table = params.get("write_to_table", None)
 
         return result
 
@@ -52,8 +53,8 @@ class ConverterSessionParams(dict):
         return self["catalog"]
 
     @property
-    def iceberg_table_name(self) -> str:
-        return self["iceberg_table_name"]
+    def iceberg_read_from_table_name(self) -> str:
+        return self["iceberg_read_from_table_name"]
 
     @property
     def iceberg_warehouse_bucket_name(self) -> str:
@@ -142,3 +143,11 @@ class ConverterSessionParams(dict):
         self, location_provider_prefix_override: Optional[str]
     ) -> None:
         self["location_provider_prefix_override"] = location_provider_prefix_override
+
+    @property
+    def write_to_table(self) -> Optional[Catalog.Table]:
+        return self["write_to_table"]
+
+    @write_to_table.setter
+    def write_to_table(self, write_to_table: Optional[Catalog.Table]) -> None:
+        self["write_to_table"] = write_to_table

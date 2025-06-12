@@ -11,7 +11,7 @@ class ConvertInput(Dict):
         convert_task_index: int,
         iceberg_table_warehouse_prefix: str,
         identifier_fields: List[str],
-        table_io: Any,
+        write_to_table_io: Any,
         table_metadata: Any,
         compact_previous_position_delete_files: bool,
         enforce_primary_key_uniqueness: bool,
@@ -27,7 +27,7 @@ class ConvertInput(Dict):
         result["convert_task_index"] = convert_task_index
         result["identifier_fields"] = identifier_fields
         result["iceberg_table_warehouse_prefix"] = iceberg_table_warehouse_prefix
-        result["table_io"] = table_io
+        result["write_to_table_io"] = write_to_table_io
         result["table_metadata"] = table_metadata
         result[
             "compact_previous_position_delete_files"
@@ -60,8 +60,8 @@ class ConvertInput(Dict):
         return self["iceberg_table_warehouse_prefix"]
 
     @property
-    def table_io(self) -> Any:
-        return self["table_io"]
+    def write_to_table_io(self) -> Any:
+        return self["write_to_table_io"]
 
     @property
     def table_metadata(self) -> Any:

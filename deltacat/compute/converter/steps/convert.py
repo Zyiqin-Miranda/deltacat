@@ -39,7 +39,7 @@ def convert(convert_input: ConvertInput) -> ConvertResult:
     convert_task_index = convert_input.convert_task_index
     iceberg_table_warehouse_prefix = convert_input.iceberg_table_warehouse_prefix
     identifier_fields = convert_input.identifier_fields
-    table_io = convert_input.table_io
+    write_to_table_io = convert_input.write_to_table_io
     table_metadata = convert_input.table_metadata
     compact_previous_position_delete_files = (
         convert_input.compact_previous_position_delete_files
@@ -74,8 +74,11 @@ def convert(convert_input: ConvertInput) -> ConvertResult:
     partition_value = convert_input_files.partition_value
 
     if partition_value_str:
+        # iceberg_table_warehouse_prefix_with_partition = (
+        #     f"{iceberg_table_warehouse_prefix}/{partition_value_str}"
+        # )
         iceberg_table_warehouse_prefix_with_partition = (
-            f"{iceberg_table_warehouse_prefix}/{partition_value_str}"
+            f"{iceberg_table_warehouse_prefix}"
         )
     else:
         iceberg_table_warehouse_prefix_with_partition = (
@@ -164,7 +167,7 @@ def convert(convert_input: ConvertInput) -> ConvertResult:
         )
         file_content_type = DataFileContent.POSITION_DELETES
         to_be_added_files_list = parquet_files_dict_to_iceberg_data_files(
-            io=table_io,
+            io=write_to_table_io,
             table_metadata=table_metadata,
             files_dict=to_be_added_files_dict,
             file_content_type=file_content_type,

@@ -42,8 +42,7 @@ def converter_session(params: ConverterSessionParams, **kwargs: Any) -> None:
     """
 
     catalog = params.catalog
-    table_name = params.iceberg_table_name
-    iceberg_table = load_table(catalog, table_name)
+    read_from_table_name = params.iceberg_read_from_table_name
     enforce_primary_key_uniqueness = params.enforce_primary_key_uniqueness
     iceberg_warehouse_bucket_name = params.iceberg_warehouse_bucket_name
     iceberg_namespace = params.iceberg_namespace
@@ -58,9 +57,12 @@ def converter_session(params: ConverterSessionParams, **kwargs: Any) -> None:
     position_delete_for_multiple_data_files = (
         params.position_delete_for_multiple_data_files
     )
+    write_to_table_name = params.write_to_table
+    read_from_table = load_table(catalog, read_from_table_name)
+    write_to_table = load_table(catalog, write_to_table_name)
 
     data_file_dict, equality_delete_dict, pos_delete_dict = fetch_all_bucket_files(
-        iceberg_table
+        read_from_table
     )
 
     convert_input_files_for_all_buckets = group_all_files_to_each_bucket(
@@ -72,7 +74,7 @@ def converter_session(params: ConverterSessionParams, **kwargs: Any) -> None:
     if not location_provider_prefix_override:
         iceberg_table_warehouse_prefix = construct_iceberg_table_prefix(
             iceberg_warehouse_bucket_name=iceberg_warehouse_bucket_name,
-            table_name=table_name,
+            table_name=write_to_table_name,
             iceberg_namespace=iceberg_namespace,
         )
     else:
@@ -80,7 +82,7 @@ def converter_session(params: ConverterSessionParams, **kwargs: Any) -> None:
 
     # Using table identifier fields as merge keys if merge keys not provided
     if not merge_keys:
-        identifier_fields_set = iceberg_table.schema().identifier_field_names()
+        identifier_fields_set = read_from_table.schema().identifier_field_names()
         identifier_fields = list(identifier_fields_set)
     else:
         identifier_fields = merge_keys
@@ -106,8 +108,8 @@ def converter_session(params: ConverterSessionParams, **kwargs: Any) -> None:
                 iceberg_table_warehouse_prefix=iceberg_table_warehouse_prefix,
                 identifier_fields=identifier_fields,
                 compact_previous_position_delete_files=compact_previous_position_delete_files,
-                table_io=iceberg_table.io,
-                table_metadata=iceberg_table.metadata,
+                write_to_table_io=write_to_table.io,
+                table_metadata=write_to_table.metadata,
                 enforce_primary_key_uniqueness=enforce_primary_key_uniqueness,
                 position_delete_for_multiple_data_files=position_delete_for_multiple_data_files,
                 max_parallel_data_file_download=max_parallel_data_file_download,
@@ -171,7 +173,7 @@ def converter_session(params: ConverterSessionParams, **kwargs: Any) -> None:
     )
 
     logger.info(
-        f"Aggregated stats for {table_name}: "
+        f"Aggregated stats for job reading from {read_from_table_name} and writing to {write_to_table_name}: "
         f"total position delete record count: {total_position_delete_record_count}, "
         f"total input data file record count: {total_input_data_file_record_count}, "
         f"total data file hash columns in memory sizes: {total_data_file_hash_columns_in_memory_sizes}, "
@@ -195,15 +197,15 @@ def converter_session(params: ConverterSessionParams, **kwargs: Any) -> None:
     logger.info(f"To be added files list length: {len(to_be_added_files_list)}")
 
     if not to_be_deleted_files_list and to_be_added_files_list:
-        logger.info(f"Committing append snapshot for {table_name}.")
+        logger.info(f"Committing append snapshot for {write_to_table_name}.")
         commit_append_snapshot(
-            iceberg_table=iceberg_table,
+            iceberg_table=write_to_table,
             new_position_delete_files=to_be_added_files_list,
         )
-    else:
-        logger.info(f"Committing replace snapshot for {table_name}.")
+    elif to_be_added_files_list:
+        logger.info(f"Committing replace snapshot for {write_to_table_name}.")
         commit_replace_snapshot(
-            iceberg_table=iceberg_table,
+            iceberg_table=write_to_table,
             to_be_deleted_files=to_be_deleted_files_list,
             new_position_delete_files=to_be_added_files_list,
         )
