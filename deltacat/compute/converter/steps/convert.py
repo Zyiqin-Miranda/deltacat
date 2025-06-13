@@ -139,6 +139,8 @@ def convert(convert_input: ConvertInput) -> ConvertResult:
         logger.info(
             f"[Convert task {convert_task_index}]: Dedupe produced {len(pos_delete_after_dedupe)} position delete records."
         )
+        print(f"debug_total_pos_delete_table:{total_pos_delete_table}")
+        print(f"debug_pos_delete_after_dedupe:{pos_delete_after_dedupe}")
         total_pos_delete_table.append(pos_delete_after_dedupe)
 
     total_pos_delete = pa.concat_tables(total_pos_delete_table)

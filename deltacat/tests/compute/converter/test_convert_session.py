@@ -291,7 +291,7 @@ def test_converter_drop_duplicates_success(
     download_data_mock = mocker.patch(
         "deltacat.compute.converter.utils.io.daft_read_parquet"
     )
-    download_data_mock.side_effect = (daft_df_1, daft_df_2, daft_df_3)
+    download_data_mock.side_effect = (daft_df_3, daft_df_2, daft_df_1)
 
     convert_ref = convert.remote(convert_input)
 
@@ -315,6 +315,7 @@ def test_converter_drop_duplicates_success(
     # 5. Only primary key 2 and 3 should exist in table, as primary key 1 is deleted.
     pyiceberg_scan_table_rows = tbl.scan().to_arrow().to_pydict()
 
+    print(f"debug_pyiceberg_scan_table_rows:{pyiceberg_scan_table_rows}")
     # Only one unique record for each pk exists
     all_pk = sorted(pyiceberg_scan_table_rows["primary_key"])
     assert all_pk == ["pk1", "pk2", "pk3", "pk4"]
@@ -448,7 +449,7 @@ def test_converter_pos_delete_read_by_spark_success(
     download_data_mock = mocker.patch(
         "deltacat.compute.converter.utils.io.daft_read_parquet"
     )
-    download_data_mock.side_effect = (daft_df_1, daft_df_2, daft_df_3)
+    download_data_mock.side_effect = (daft_df_3, daft_df_2, daft_df_1)
 
     convert_ref = convert.remote(convert_input)
 
@@ -611,7 +612,7 @@ def test_converter_pos_delete_multiple_identifier_fields_success(
     download_data_mock = mocker.patch(
         "deltacat.compute.converter.utils.io.daft_read_parquet"
     )
-    download_data_mock.side_effect = (daft_df_1, daft_df_2, daft_df_3)
+    download_data_mock.side_effect = (daft_df_3, daft_df_2, daft_df_1)
 
     convert_ref = convert.remote(convert_input)
 
@@ -811,7 +812,7 @@ def test_converter_equality_delete_with_duplicates_success(
         "deltacat.compute.converter.utils.io.daft_read_parquet"
     )
     # Note: order of df need to be maintained here.
-    download_data_mock.side_effect = (daft_df_1, daft_df_2, daft_df_3, daft_df_4)
+    download_data_mock.side_effect = (daft_df_3, daft_df_2, daft_df_1, daft_df_4)
 
     convert_ref = convert.remote(convert_input)
 

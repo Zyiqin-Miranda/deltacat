@@ -61,9 +61,17 @@ def download_parquet_with_daft_hash_applied(
         df=df, identifier_columns=identifier_columns
     )
 
-    table = pa.Table.from_arrays(
-        [hash_column], names=[sc._IDENTIFIER_COLUMNS_HASH_COLUMN_NAME]
-    )
+    # Convert original identifier columns to Arrow arrays
+    identifier_arrays = []
+    for col in identifier_columns:
+        col_data = df.select(daft.col(col)).to_arrow()[col]
+        identifier_arrays.append(col_data)
+
+    # Create table with both hash and original columns
+    arrays = [hash_column] + identifier_arrays
+    names = [sc._IDENTIFIER_COLUMNS_HASH_COLUMN_NAME] + identifier_columns
+
+    table = pa.Table.from_arrays(arrays, names=names)
 
     return table
 

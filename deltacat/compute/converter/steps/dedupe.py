@@ -17,6 +17,41 @@ import numpy as np
 logger = logs.configure_deltacat_logger(logging.getLogger(__name__))
 
 
+def drop_duplicates(table: pa.Table, subset: List[str]) -> Tuple[pa.Table, pa.Table]:
+    """
+    Drop duplicate rows from a PyArrow table based on specified columns.
+    Uses PyArrow's group_by and aggregate functions to efficiently drop duplicates.
+    Returns both the table with duplicates to keep and the table with duplicates to delete.
+
+    Args:
+        table: The input PyArrow table
+        subset: List of column names to check for duplicates
+
+    Returns:
+        Tuple of (table_to_keep, table_to_delete)
+    """
+    if not table or not subset:
+        return table, pa.Table.from_arrays([], [])
+
+    # Group by the hash column and take the first record for each group
+    grouped = table.group_by(sc._IDENTIFIER_COLUMNS_HASH_COLUMN_NAME).aggregate(
+        [(sc._ORDERED_RECORD_IDX_COLUMN_NAME, "max")]
+    )
+
+    # Get the indices of records to keep
+    indices_to_keep = grouped[f"{sc._ORDERED_RECORD_IDX_COLUMN_NAME}_max"].to_numpy()
+
+    # Create masks for the rows to keep and delete
+    keep_mask = pc.is_in(
+        pa.array(range(len(table))),
+        value_set=pa.array(indices_to_keep),
+    )
+    delete_mask = pc.invert(keep_mask)
+
+    # Return both tables
+    return table.filter(keep_mask), table.filter(delete_mask)
+
+
 class VersionedBloomFilter:
     def __init__(self, expected_elements: int, false_positive_rate: float = 0.01):
         """Initialize versioned Bloom filter that tracks latest version of each element."""
@@ -24,6 +59,8 @@ class VersionedBloomFilter:
         self.hash_count = self._get_hash_count(self.size, expected_elements)
         # Each slot contains (version, batch_idx, row_idx) or None
         self.slots = np.full(self.size, None, dtype=object)
+        # Track individual records by their hash
+        self.record_versions = {}  # hash -> (version, batch_idx, row_idx)
         logger.info(
             f"Initialized versioned Bloom filter with size {self.size} bits and {self.hash_count} hash functions"
         )
@@ -48,34 +85,34 @@ class VersionedBloomFilter:
 
     def add_or_update(
         self, key: str, version: int, batch_idx: int, row_idx: int
-    ) -> bool:
+    ) -> Tuple[bool, Optional[Tuple[int, int, int]]]:
         """
         Add or update an item with its version info.
-        Returns True if this is the latest version seen for this key.
-        For records within same version (sequence_number), keeps the one with highest row_idx.
+        Returns (is_latest, previous_version_info) where:
+        - is_latest: True if this is the latest version seen for this key
+        - previous_version_info: (version, batch_idx, row_idx) of previous version if exists
         """
         slots = self._get_hash_values(key)
         is_latest = True
+        previous_version = None
 
-        # First pass: check if we've seen a higher version
-        for slot in slots:
-            if self.slots[slot] is not None:
-                curr_version, curr_batch_idx, curr_row_idx = self.slots[slot]
-                if curr_version > version:
-                    is_latest = False
-                    break
-                elif curr_version == version:
-                    # For same version, compare row indices
-                    if curr_row_idx >= row_idx:
-                        is_latest = False
-                        break
+        # Check if we've seen this record before
+        if key in self.record_versions:
+            prev_version, prev_batch_idx, prev_row_idx = self.record_versions[key]
+            if prev_version > version:
+                is_latest = False
+                previous_version = (prev_version, prev_batch_idx, prev_row_idx)
+            elif prev_version == version and prev_row_idx >= row_idx:
+                is_latest = False
+                previous_version = (prev_version, prev_batch_idx, prev_row_idx)
 
-        # If this is the latest version or has highest row_idx in same version
+        # If this is the latest version, update the record
         if is_latest:
+            self.record_versions[key] = (version, batch_idx, row_idx)
             for slot in slots:
                 self.slots[slot] = (version, batch_idx, row_idx)
 
-        return is_latest
+        return is_latest, previous_version
 
     def get_latest_records(self) -> Dict[int, List[Tuple[int, int]]]:
         """
@@ -108,10 +145,12 @@ def dedupe_data_files(
     """
     Deduplicate records across data files, ensuring records with highest sequence numbers are kept.
     Uses a versioned Bloom filter to track latest records directly in the filter structure.
+    Files are processed in descending order by sequence number to ensure latest records are kept.
+    Returns the table containing records to be deleted.
     """
-    # Sort files by sequence number in ascending order
+    # Sort files by sequence number in descending order
     data_file_to_dedupe = sort_data_files_maintaining_order(
-        data_files=data_file_to_dedupe
+        data_files=data_file_to_dedupe, reverse=True
     )
 
     # Count total records to size Bloom filter
@@ -127,26 +166,29 @@ def dedupe_data_files(
 
     # Process all files to track latest records
     downloaded_data_file_record_count = 0
-    data_file_tables = []
+    tables_to_delete = []
 
     # First handle remaining data table if it exists
     if remaining_data_table_after_convert:
-        data_file_tables.append(remaining_data_table_after_convert)
         downloaded_data_file_record_count += len(remaining_data_table_after_convert)
 
-        for batch_idx, batch in enumerate(
-            remaining_data_table_after_convert.to_batches()
-        ):
-            for row_idx in range(len(batch)):
-                key = "_".join(
-                    str(batch[col][row_idx].as_py()) for col in identifier_columns
-                )
-                bloom.add_or_update(
-                    key, -1, batch_idx, row_idx
-                )  # Use -1 for remaining table sequence
+        # Drop duplicates within the remaining table first
+        remaining_table_to_keep, remaining_table_to_delete = drop_duplicates(
+            remaining_data_table_after_convert, identifier_columns
+        )
 
-    # Process each file in sequence number order
+        # Process records to track latest version
+        for batch_idx, batch in enumerate(remaining_table_to_keep.to_batches()):
+            for row_idx in range(len(batch)):
+                key = batch[sc._IDENTIFIER_COLUMNS_HASH_COLUMN_NAME][row_idx].as_py()
+                bloom.add_or_update(key, -1, batch_idx, row_idx)
+
+        if len(remaining_table_to_delete) > 0:
+            tables_to_delete.append(remaining_table_to_delete)
+
+    # Process each file in sequence number order (descending)
     for sequence_number, data_file in data_file_to_dedupe:
+        # Download and process one file at a time
         data_file_table = download_data_table_and_append_iceberg_columns(
             file=data_file,
             columns_to_download=identifier_columns,
@@ -160,58 +202,56 @@ def dedupe_data_files(
             f"Processing file with sequence {sequence_number}, records: {len(data_file_table)}"
         )
 
-        data_file_tables.append(data_file_table)
         downloaded_data_file_record_count += len(data_file_table)
 
+        # Drop duplicates within this file first
+        data_file_table_to_keep, data_file_table_to_delete = drop_duplicates(
+            data_file_table, identifier_columns
+        )
+
         # Process records to track latest version
-        for batch_idx, batch in enumerate(data_file_table.to_batches()):
+        records_to_keep = []
+        records_to_delete = []
+
+        for batch_idx, batch in enumerate(data_file_table_to_keep.to_batches()):
             for row_idx in range(len(batch)):
-                key = "_".join(
-                    str(batch[col][row_idx].as_py()) for col in identifier_columns
+                key = batch[sc._IDENTIFIER_COLUMNS_HASH_COLUMN_NAME][row_idx].as_py()
+                is_latest, previous_version = bloom.add_or_update(
+                    key, sequence_number, batch_idx, row_idx
                 )
-                bloom.add_or_update(key, sequence_number, batch_idx, row_idx)
 
-    # Get latest records from Bloom filter
-    version_to_records = bloom.get_latest_records()
+                if not is_latest:
+                    # If we've seen this record in a higher sequence number, add to delete
+                    records_to_delete.append(row_idx)
+                else:
+                    # If this is a new record or has a higher sequence number, keep it
+                    records_to_keep.append(row_idx)
 
-    # Build final table keeping only latest records
-    final_tables = []
-
-    # Process remaining table if it exists
-    if remaining_data_table_after_convert and -1 in version_to_records:
-        records = version_to_records[-1]
-        indices_to_keep = [row_idx for _, row_idx in records]
-        if indices_to_keep:
-            mask = pc.is_in(
-                pa.array(range(len(remaining_data_table_after_convert))),
-                value_set=pa.array(indices_to_keep),
+        # Add records to delete
+        if records_to_delete:
+            delete_mask = pc.is_in(
+                pa.array(range(len(data_file_table_to_keep))),
+                value_set=pa.array(records_to_delete),
             )
-            final_tables.append(remaining_data_table_after_convert.filter(mask))
+            tables_to_delete.append(data_file_table_to_keep.filter(delete_mask))
 
-    # Process each data file
-    for sequence_number, data_file in data_file_to_dedupe:
-        if sequence_number in version_to_records:
-            records = version_to_records[sequence_number]
-            indices_to_keep = [row_idx for _, row_idx in records]
-            if indices_to_keep:
-                table = data_file_tables[
-                    sequence_number + 1
-                    if remaining_data_table_after_convert
-                    else sequence_number
-                ]
-                mask = pc.is_in(
-                    pa.array(range(len(table))), value_set=pa.array(indices_to_keep)
-                )
-                final_tables.append(table.filter(mask))
+        # Add any records from the initial deduplication
+        if len(data_file_table_to_delete) > 0:
+            tables_to_delete.append(data_file_table_to_delete)
 
-    # Combine all tables
-    final_data_to_dedupe = (
-        pa.concat_tables(final_tables) if final_tables else pa.table([])
+    # Combine all tables to delete
+    if not tables_to_delete:
+        return pa.Table.from_arrays([], []), 0, downloaded_data_file_record_count
+
+    final_table_to_delete = pa.concat_tables(tables_to_delete)
+
+    # Drop the hash column from the final result
+    final_table_to_delete = final_table_to_delete.drop(
+        [sc._IDENTIFIER_COLUMNS_HASH_COLUMN_NAME]
     )
-    logger.info(f"Final deduplicated table length: {len(final_data_to_dedupe)}")
 
     return (
-        final_data_to_dedupe,
+        final_table_to_delete,
+        len(final_table_to_delete),
         downloaded_data_file_record_count,
-        int(final_data_to_dedupe.nbytes),
     )
