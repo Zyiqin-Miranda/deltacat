@@ -71,6 +71,10 @@ def converter_session(params: ConverterSessionParams, **kwargs: Any) -> None:
         pos_delete_dict=pos_delete_dict,
     )
 
+    if not convert_input_files_for_all_buckets:
+        logger.info("No files found to convert and enforce primary key uniqueness on!")
+        return
+
     if not location_provider_prefix_override:
         iceberg_table_warehouse_prefix = construct_iceberg_table_prefix(
             iceberg_warehouse_bucket_name=iceberg_warehouse_bucket_name,

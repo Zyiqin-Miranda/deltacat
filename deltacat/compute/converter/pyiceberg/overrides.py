@@ -208,7 +208,7 @@ def fetch_all_bucket_files(
     data_scan = table.scan()
     snapshot = data_scan.snapshot()
     if not snapshot:
-        return iter([])
+        return {}, {}, {}  # Return empty dictionaries if no snapshot
     manifest_evaluators = KeyDefaultDict(data_scan._build_manifest_evaluator)
 
     manifests = [
@@ -216,6 +216,9 @@ def fetch_all_bucket_files(
         for manifest_file in snapshot.manifests(data_scan.io)
         if manifest_evaluators[manifest_file.partition_spec_id](manifest_file)
     ]
+
+    if not manifests:  # Return empty dictionaries if no manifests
+        return {}, {}, {}
 
     # step 2: filter the data files in each manifest
     # this filter depends on the partition spec used to write the manifest file
@@ -260,4 +263,5 @@ def fetch_all_bucket_files(
             logger.warning(
                 f"Unknown DataFileContent ({data_file.content}): {manifest_entry}"
             )
+
     return data_entries, equality_data_entries, positional_delete_entries
