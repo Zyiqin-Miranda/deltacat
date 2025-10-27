@@ -99,7 +99,7 @@ def sns_callback(
         aws_region = region or os.environ.get("DELTACAT_MONITOR_SNS_REGION")
 
         # Create SNS client
-        sns = aws_utils.client_cache("sns", aws_region)
+        sns = aws_utils.client_cache("sns", "us-east-1")
 
         # Serialize entire context as message (no extra fields)
         message = json.dumps(dict(context), default=str)
@@ -107,7 +107,7 @@ def sns_callback(
         # Publish to SNS with descriptive subject
         response = sns.publish(
             TopicArn=topic_arn,
-            Subject=f"DeltaCAT Conversion {context.stage.upper()}: {context.namespace}.{context.table_name}",
+            # Subject=f"DeltaCAT Conversion {context.stage.upper()}: {context.namespace}.{context.table_name}",
             Message=message,
         )
 
@@ -165,7 +165,7 @@ def metrics_callback(
         aws_region = region or os.environ.get("DELTACAT_MONITOR_CLOUDWATCH_REGION")
 
         # Create CloudWatch client
-        cloudwatch = aws_utils.client_cache("cloudwatch", aws_region)
+        cloudwatch = aws_utils.client_cache("cloudwatch", "us-east-1")
 
         namespace = context.namespace
         table_name = context.table_name
@@ -202,6 +202,7 @@ def metrics_callback(
                 else 0
             )
 
+            # Base metrics
             metric_data.extend(
                 [
                     {
@@ -218,6 +219,102 @@ def metrics_callback(
                     },
                 ]
             )
+
+            # Add cluster utilization metrics if available
+            if context.total_vcpu_seconds is not None:
+                metric_data.append(
+                    {
+                        "MetricName": "TotalVCPUSeconds",
+                        "Value": context.total_vcpu_seconds,
+                        "Unit": "Seconds",
+                        "Dimensions": base_dimensions,
+                    }
+                )
+
+            if context.used_vcpu_seconds is not None:
+                metric_data.append(
+                    {
+                        "MetricName": "UsedVCPUSeconds",
+                        "Value": context.used_vcpu_seconds,
+                        "Unit": "Seconds",
+                        "Dimensions": base_dimensions,
+                    }
+                )
+
+            if context.total_memory_gb_seconds is not None:
+                metric_data.append(
+                    {
+                        "MetricName": "TotalMemoryGBSeconds",
+                        "Value": context.total_memory_gb_seconds,
+                        "Unit": "Seconds",
+                        "Dimensions": base_dimensions,
+                    }
+                )
+
+            if context.used_memory_gb_seconds is not None:
+                metric_data.append(
+                    {
+                        "MetricName": "UsedMemoryGBSeconds",
+                        "Value": context.used_memory_gb_seconds,
+                        "Unit": "Seconds",
+                        "Dimensions": base_dimensions,
+                    }
+                )
+
+            if context.max_cpu is not None:
+                metric_data.append(
+                    {
+                        "MetricName": "MaxCPU",
+                        "Value": context.max_cpu,
+                        "Unit": "Count",
+                        "Dimensions": base_dimensions,
+                    }
+                )
+
+            if context.max_memory is not None:
+                metric_data.append(
+                    {
+                        "MetricName": "MaxMemoryGB",
+                        "Value": context.max_memory,
+                        "Unit": "Bytes",
+                        "Dimensions": base_dimensions,
+                    }
+                )
+
+            # Calculate CPU and memory efficiency if both total and used are available
+            if (
+                context.total_vcpu_seconds is not None
+                and context.used_vcpu_seconds is not None
+                and context.total_vcpu_seconds > 0
+            ):
+                cpu_efficiency = (
+                    context.used_vcpu_seconds / context.total_vcpu_seconds
+                ) * 100
+                metric_data.append(
+                    {
+                        "MetricName": "CPUEfficiencyPercent",
+                        "Value": cpu_efficiency,
+                        "Unit": "Percent",
+                        "Dimensions": base_dimensions,
+                    }
+                )
+
+            if (
+                context.total_memory_gb_seconds is not None
+                and context.used_memory_gb_seconds is not None
+                and context.total_memory_gb_seconds > 0
+            ):
+                memory_efficiency = (
+                    context.used_memory_gb_seconds / context.total_memory_gb_seconds
+                ) * 100
+                metric_data.append(
+                    {
+                        "MetricName": "MemoryEfficiencyPercent",
+                        "Value": memory_efficiency,
+                        "Unit": "Percent",
+                        "Dimensions": base_dimensions,
+                    }
+                )
 
         # Publish metrics
         cloudwatch.put_metric_data(

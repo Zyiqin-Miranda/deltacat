@@ -170,12 +170,60 @@ class CallbackContext(dict):
 
 # Type definitions for callbacks
 CallbackType = Callable[[CallbackContext], Optional[CallbackResult]]
-CallbackSpec = Union[CallbackType, str]  # Function or "module:function"
+CallbackSpec = Union[
+    CallbackType, str, List[Union[CallbackType, str]]
+]  # Function, "module:function", or list of either
 
 
-def _resolve_callback(callback_spec: Optional[CallbackSpec]) -> Optional[CallbackType]:
+def _resolve_callback(
+    callback_spec: Optional[CallbackSpec],
+) -> Optional[List[CallbackType]]:
     """
-    Resolve a callback specification to a callable function.
+    Resolve a callback specification to a list of callable functions.
+
+    Args:
+        callback_spec: Either a callable function, a string in "module.path:function_name" format,
+                      or a list of either
+
+    Returns:
+        List of resolved callable functions or None
+
+    Raises:
+        ValueError: If string format is invalid
+        TypeError: If callback_spec type is unsupported
+
+    Examples:
+        >>> _resolve_callback(my_function)  # Direct function
+        [<function my_function>]
+
+        >>> _resolve_callback("my_module.callbacks:post_conversion")  # String import
+        [<function post_conversion>]
+
+        >>> _resolve_callback([my_function, "my_module.callbacks:post_conversion"])  # List
+        [<function my_function>, <function post_conversion>]
+    """
+    if callback_spec is None:
+        return None
+
+    # If it's a list, resolve each callback in the list
+    if isinstance(callback_spec, list):
+        resolved_callbacks = []
+        for callback in callback_spec:
+            resolved = _resolve_single_callback(callback)
+            if resolved is not None:
+                resolved_callbacks.append(resolved)
+        return resolved_callbacks if resolved_callbacks else None
+
+    # Single callback - resolve and return as list
+    resolved = _resolve_single_callback(callback_spec)
+    return [resolved] if resolved is not None else None
+
+
+def _resolve_single_callback(
+    callback_spec: Union[CallbackType, str]
+) -> Optional[CallbackType]:
+    """
+    Resolve a single callback specification to a callable function.
 
     Args:
         callback_spec: Either a callable function or a string in "module.path:function_name" format
@@ -186,13 +234,6 @@ def _resolve_callback(callback_spec: Optional[CallbackSpec]) -> Optional[Callbac
     Raises:
         ValueError: If string format is invalid
         TypeError: If callback_spec type is unsupported
-
-    Examples:
-        >>> _resolve_callback(my_function)  # Direct function
-        <function my_function>
-
-        >>> _resolve_callback("my_module.callbacks:post_conversion")  # String import
-        <function post_conversion>
     """
     if callback_spec is None:
         return None
@@ -233,30 +274,36 @@ def _resolve_callback(callback_spec: Optional[CallbackSpec]) -> Optional[Callbac
 
 
 def _invoke_callback(
-    callback: Optional[CallbackType], context: CallbackContext
+    callbacks: Optional[List[CallbackType]], context: CallbackContext
 ) -> None:
     """
-    Invoke a callback with the given context, handling errors gracefully.
+    Invoke multiple callbacks with the given context, handling errors gracefully.
 
     Args:
-        callback: The callback function to invoke (or None)
-        context: CallbackContext instance to pass to the callback
+        callbacks: List of callback functions to invoke (or None)
+        context: CallbackContext instance to pass to each callback
     """
-    if callback is None:
+    if callbacks is None:
         return
 
-    try:
-        stage_label = f"{context.stage}-conversion"
-        logger.info(f"Invoking {stage_label} callback...")
-        result = callback(context)
-        if result is not None:
-            logger.info(
-                f"{stage_label.capitalize()} callback result: {json.dumps(result, default=str)}"
+    stage_label = f"{context.stage}-conversion"
+
+    for i, callback in enumerate(callbacks):
+        try:
+            callback_name = getattr(callback, "__name__", f"callback_{i}")
+            logger.info(f"Invoking {stage_label} callback: {callback_name}")
+            result = callback(context)
+            if result is not None:
+                logger.info(
+                    f"{stage_label.capitalize()} callback '{callback_name}' result: {json.dumps(result, default=str)}"
+                )
+        except Exception as e:
+            callback_name = getattr(callback, "__name__", f"callback_{i}")
+            logger.error(
+                f"{stage_label.capitalize()} callback '{callback_name}' failed: {e}",
+                exc_info=True,
             )
-    except Exception as e:
-        stage_label = f"{context.stage}-conversion"
-        logger.error(f"{stage_label.capitalize()} callback failed: {e}", exc_info=True)
-        # Don't fail the conversion if callback fails
+            # Don't fail the conversion if callback fails - continue with other callbacks
 
 
 def monitor_table(
@@ -288,13 +335,13 @@ def monitor_table(
         monitor_interval: Seconds between monitoring checks
         max_converter_parallelism: Maximum number of concurrent converter tasks
         ray_inactivity_timeout: Seconds to wait before shutting down Ray cluster
-        pre_conversion_callback: Optional callback invoked before converter session.
-            Can be a callable or string in "module:function" format.
+        pre_conversion_callback: Optional callback(s) invoked before converter session.
+            Can be a callable, string in "module:function" format, or list of either.
             Receives CallbackContext with all conversion parameters.
-        post_conversion_callback: Optional callback invoked after converter session completes.
-            Can be a callable or string in "module:function" format.
+        post_conversion_callback: Optional callback(s) invoked after converter session completes.
+            Can be a callable, string in "module:function" format, or list of either.
             Receives CallbackContext with all conversion parameters plus timing information.
-            Return value is logged.
+            Return values are logged.
         catalog: Optional pre-initialized catalog instance. If provided, catalog_type,
             warehouse_path, and catalog_uri are ignored. Useful for tests and scenarios
             where catalog sharing is needed.
@@ -314,9 +361,11 @@ def monitor_table(
     post_callback = _resolve_callback(post_conversion_callback)
 
     if pre_callback:
-        logger.info(f"Pre-conversion callback configured: {pre_callback.__name__}")
+        callback_names = [getattr(cb, "__name__", "unknown") for cb in pre_callback]
+        logger.info(f"Pre-conversion callbacks configured: {callback_names}")
     if post_callback:
-        logger.info(f"Post-conversion callback configured: {post_callback.__name__}")
+        callback_names = [getattr(cb, "__name__", "unknown") for cb in post_callback]
+        logger.info(f"Post-conversion callbacks configured: {callback_names}")
 
     # Create or use provided PyIceberg catalog
     if catalog is None:

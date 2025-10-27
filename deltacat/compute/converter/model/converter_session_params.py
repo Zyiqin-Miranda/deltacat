@@ -44,6 +44,8 @@ class ConverterSessionParams(dict):
         result.s3_client_kwargs = params.get("s3_client_kwargs", {})
         result.filesystem = params.get("filesystem", None)
         result.s3_prefix_override = params.get("s3_prefix_override", None)
+        result.s3_file_system = params.get("s3_file_system")
+        result.start_snapshot_id = params.get("start_snapshot_id", None)
 
         return result
 
@@ -142,3 +144,19 @@ class ConverterSessionParams(dict):
         self, location_provider_prefix_override: Optional[str]
     ) -> None:
         self["location_provider_prefix_override"] = location_provider_prefix_override
+
+    @property
+    def s3_file_system(self) -> Optional[AbstractFileSystem]:
+        return self["s3_file_system"]
+
+    @s3_file_system.setter
+    def s3_file_system(self, s3_file_system: Optional[AbstractFileSystem]) -> None:
+        self["s3_file_system"] = s3_file_system
+
+    @property
+    def start_snapshot_id(self) -> Optional[int]:
+        return self["start_snapshot_id"]
+
+    @start_snapshot_id.setter
+    def start_snapshot_id(self, start_snapshot_id: Optional[int]) -> None:
+        self["start_snapshot_id"] = start_snapshot_id

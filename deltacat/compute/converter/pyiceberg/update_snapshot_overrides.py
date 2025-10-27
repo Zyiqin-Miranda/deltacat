@@ -177,7 +177,9 @@ def commit_append_snapshot(
             if new_position_delete_files:
                 for data_file in new_position_delete_files:
                     append_snapshot.append_data_file(data_file)
-
+            tx.set_properties(
+                **{"ray.converter.snapshot_id": append_snapshot._snapshot_id}
+            )
     except Exception as e:
         raise e
     else:
@@ -294,6 +296,9 @@ def commit_replace_snapshot(
             if to_be_deleted_files:
                 for delete_file in to_be_deleted_files:
                     replace_delete_snapshot.delete_data_file(delete_file)
+            tx.set_properties(
+                **{"ray.converter.snapshot_id": replace_delete_snapshot._snapshot_id}
+            )
     except Exception as e:
         raise e
     else:

@@ -79,6 +79,7 @@ def converter_session(
             - s3_file_system: S3 file system instance
             - location_provider_prefix_override: Optional prefix override for file locations
             - position_delete_for_multiple_data_files: Whether to generate position deletes for multiple data files
+            - start_snapshot_id: Optional snapshot ID to start processing from (uses current snapshot if not provided)
         **kwargs: Additional keyword arguments (currently unused)
 
     Returns:
@@ -109,14 +110,15 @@ def converter_session(
     )
     task_max_parallelism = params.task_max_parallelism
     s3_client_kwargs = params.s3_client_kwargs
-    s3_file_system = params.filesystem
+    s3_file_system = params.s3_file_system
     location_provider_prefix_override = params.location_provider_prefix_override
     position_delete_for_multiple_data_files = (
         params.position_delete_for_multiple_data_files
     )
+    start_snapshot_id = params.start_snapshot_id
 
     data_file_dict, equality_delete_dict, pos_delete_dict = fetch_all_bucket_files(
-        iceberg_table
+        iceberg_table, start_snapshot_id
     )
 
     convert_input_files_for_all_buckets = group_all_files_to_each_bucket(
@@ -168,7 +170,7 @@ def converter_session(
                 position_delete_for_multiple_data_files=position_delete_for_multiple_data_files,
                 max_parallel_data_file_download=max_parallel_data_file_download,
                 s3_client_kwargs=s3_client_kwargs,
-                filesystem=s3_file_system,
+                s3_file_system=s3_file_system,
                 task_memory=task_opts["memory"],
             )
         }
@@ -239,6 +241,59 @@ def converter_session(
         f"max memory usage percentage: {max_memory_usage_percentage:.2f}%"
     )
 
+    # Publish CloudWatch metrics for key conversion statistics
+    try:
+        import deltacat.aws.clients as aws_utils
+
+        # Determine region from environment variable
+        aws_region = "us-east-1"
+
+        # Create CloudWatch client
+        cloudwatch = aws_utils.client_cache("cloudwatch", aws_region)
+
+        # Base dimensions for all metrics
+        base_dimensions = [
+            {"Name": "Namespace", "Value": iceberg_namespace},
+            {"Name": "Table", "Value": table_name},
+            {"Name": "Stage", "Value": "converter_session"},
+        ]
+
+        # Prepare metric data
+        metric_data = [
+            {
+                "MetricName": "TotalPositionDeleteRecordCount",
+                "Value": total_position_delete_record_count,
+                "Unit": "Count",
+                "Dimensions": base_dimensions,
+            },
+            {
+                "MetricName": "TotalInputDataFileRecordCount",
+                "Value": total_input_data_file_record_count,
+                "Unit": "Count",
+                "Dimensions": base_dimensions,
+            },
+            {
+                "MetricName": "TotalInputDataFilesOnDiskSize",
+                "Value": total_input_data_files_on_disk_size,
+                "Unit": "Bytes",
+                "Dimensions": base_dimensions,
+            },
+        ]
+
+        # Publish metrics to CloudWatch
+        cloudwatch.put_metric_data(
+            Namespace="DeltaCAT/ConverterSession", MetricData=metric_data
+        )
+
+        logger.info(
+            f"Published {len(metric_data)} CloudWatch metrics for {table_identifier}"
+        )
+
+    except ImportError:
+        logger.debug("boto3 not installed, skipping CloudWatch metrics publishing")
+    except Exception as e:
+        logger.warning(f"Failed to publish CloudWatch metrics: {e}")
+
     to_be_added_files_list: List[DataFile] = []
     for convert_result in convert_results:
         to_be_added_files = convert_result.to_be_added_files
@@ -270,20 +325,20 @@ def converter_session(
     try:
         if snapshot_type == SnapshotType.APPEND:
             logger.info(f"Committing append snapshot for {table_identifier}.")
-            converter_snapshot_id = commit_append_snapshot(
+            new_metadata, converter_snapshot_id = commit_append_snapshot(
                 iceberg_table=iceberg_table,
                 new_position_delete_files=to_be_added_files_list,
             )
         elif snapshot_type == SnapshotType.REPLACE:
             logger.info(f"Committing replace snapshot for {table_identifier}.")
-            converter_snapshot_id = commit_replace_snapshot(
+            new_metadata, converter_snapshot_id = commit_replace_snapshot(
                 iceberg_table=iceberg_table,
                 to_be_deleted_files=to_be_deleted_files_list,
                 new_position_delete_files=to_be_added_files_list,
             )
         elif snapshot_type == SnapshotType.DELETE:
             logger.info(f"Committing delete snapshot for {table_identifier}.")
-            converter_snapshot_id = commit_replace_snapshot(
+            new_metadata, converter_snapshot_id = commit_replace_snapshot(
                 iceberg_table=iceberg_table,
                 to_be_deleted_files=to_be_deleted_files_list,
                 new_position_delete_files=[],  # No new files to add
@@ -297,7 +352,7 @@ def converter_session(
         )
 
         # Return the converter committed snapshot id
-        return iceberg_table.metadata, converter_snapshot_id
+        return new_metadata, converter_snapshot_id
     except Exception as e:
         logger.error(f"Failed to commit snapshot for {table_identifier}: {str(e)}")
         raise

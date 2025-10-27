@@ -48,7 +48,7 @@ def convert(convert_input: ConvertInput) -> ConvertResult:
         convert_input.position_delete_for_multiple_data_files
     )
     max_parallel_data_file_download = convert_input.max_parallel_data_file_download
-    filesystem = convert_input.filesystem
+    s3_file_system = convert_input.s3_file_system
     s3_client_kwargs = convert_input.s3_client_kwargs
     task_memory = convert_input.task_memory
 
@@ -96,7 +96,7 @@ def convert(convert_input: ConvertInput) -> ConvertResult:
             iceberg_table_warehouse_prefix_with_partition=iceberg_table_warehouse_prefix_with_partition,
             convert_task_index=convert_task_index,
             max_parallel_data_file_download=max_parallel_data_file_download,
-            s3_file_system=filesystem,
+            s3_file_system=s3_file_system,
             s3_client_kwargs=s3_client_kwargs,
         )
         if pos_delete_after_converting_equality_delete:
@@ -153,7 +153,7 @@ def convert(convert_input: ConvertInput) -> ConvertResult:
             table=total_pos_delete,
             base_path=iceberg_table_warehouse_prefix_with_partition,
             table_writer_kwargs={},
-            filesystem=filesystem,
+            s3_file_system=s3_file_system,
         )
 
         to_be_added_files_dict = defaultdict()

@@ -140,6 +140,7 @@ def write_sliced_table(
     content_type: ContentType = ContentType.PARQUET,
     max_records_per_file: Optional[int] = 4000000,
     filesystem: Optional[Union[AbstractFileSystem, pa.fs.FileSystem]] = None,
+    s3_file_system: Optional[any] = None,
     skip_manifest_write: bool = False,
     **kwargs,
 ) -> List[str]:
@@ -217,6 +218,6 @@ def write_sliced_table(
             s3_table_writer_kwargs=table_writer_kwargs,
             content_type=content_type,
             max_records_per_file=max_records_per_file,
-            filesystem=filesystem,
+            filesystem=s3_file_system,
             **kwargs,
         )
